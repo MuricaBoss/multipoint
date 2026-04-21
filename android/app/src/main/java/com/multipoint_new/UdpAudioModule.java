@@ -205,7 +205,11 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     socket = new DatagramSocket(null);
                     socket.setReuseAddress(true);
                     socket.bind(new java.net.InetSocketAddress(9999));
-                    socket.setReceiveBufferSize(1024 * 1024);
+                    
+                    // LATENCY KILLER: Reduce OS buffer from 1MB to 32KB. 
+                    // This prevents the OS from holding seconds of stale audio data during jitter.
+                    socket.setReceiveBufferSize(32 * 1024); 
+                    
                     byte[] buffer = new byte[8192];
                     
                     while (isRunning) {
@@ -217,7 +221,9 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
 
                         AudioTrack track = getOrCreateTrack(senderIp, 48000);
                         if (track != null && isRunning) {
-                            track.write(buffer, 0, length);
+                            // Use NON_BLOCKING to ensure we always prioritize the latest incoming data
+                            // instead of queuing up behind old samples.
+                            track.write(buffer, 0, length, AudioTrack.WRITE_NON_BLOCKING);
                         }
                     }
                 } catch (Exception e) {
@@ -288,7 +294,16 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     .setAudioFormat(format)
                     .setBufferSizeInBytes(minBufferSize)
                     .setTransferMode(AudioTrack.MODE_STREAM)
+                    .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                     .build();
+            
+            // DEEP LATENCY OPTIMIZATION: Shrink the active buffer size beyond the 'minimum' recommendation.
+            // 720 frames at 48kHz is exactly 15ms. This represents the best stable-low-latency target.
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                int targetFrames = 720; 
+                int actualFrames = track.setBufferSizeInFrames(targetFrames);
+                Log.d(TAG, "⚡️ Latency Stabilization: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
+            }
             
             track.play();
             playerMap.put(ip, track);

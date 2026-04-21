@@ -17,14 +17,24 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     private var silenceCounter: Int = 0
     private let silenceHangoverFrames: Int = 50 // Approx 500ms at 10ms chunks
 
-    func setTargetIP(_ ip: String) {
+    func setTarget(ip: String, port: Int) {
+        if udpSocket >= 0 { close(udpSocket) }
         udpSocket = socket(AF_INET, SOCK_DGRAM, 0)
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(9999).bigEndian
+        addr.sin_port = UInt16(port).bigEndian
         addr.sin_addr.s_addr = inet_addr(ip)
         targetAddress = addr
-        print("📡 UDP Target Set: \(ip):9999")
+        print("📡 UDP Target Set: \(ip):\(port)")
+    }
+
+    func stopCapture() {
+        stream?.stopCapture { _ in }
+        stream = nil
+        if udpSocket >= 0 {
+            close(udpSocket)
+            udpSocket = -1
+        }
     }
 
     func startCapture() async throws {
@@ -45,14 +55,15 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         config.channelCount = 2 // Stereo
         config.width = 2 // Minimal video
         config.height = 2
-        config.queueDepth = 5 // Balanced latency
+        config.queueDepth = 2 // Extremely low latency (minimum possible is 1-2)
         
         stream = SCStream(filter: filter, configuration: config, delegate: self)
-        let captureQueue = DispatchQueue(label: "com.antigravity.audioCapture", qos: .userInteractive)
+        let audioQueue = DispatchQueue(label: "com.antigravity.audioCapture", qos: .userInteractive)
+        let screenQueue = DispatchQueue(label: "com.antigravity.screenCapture", qos: .background)
         
         print("🎙️ Adding stream outputs...")
-        try stream?.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
-        try stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+        try stream?.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        try stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: screenQueue)
         
         try await stream?.startCapture()
         print("🎙️ SCStream.startCapture() completed.")
