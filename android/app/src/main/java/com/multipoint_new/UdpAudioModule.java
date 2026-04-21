@@ -273,30 +273,24 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         }
 
         try {
-            int minBufferSize = AudioTrack.getMinBufferSize(sampleRate, 
-                    AudioFormat.CHANNEL_OUT_STEREO, 
-                    AudioFormat.ENCODING_PCM_16BIT);
-
             AudioAttributes attributes = new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
                     .build();
 
-            // NATIVE OPTIMIZATION: Query hardware-native sample rate and buffer size
-            int nativeSampleRate = 48000;
-            try {
-                android.media.AudioManager am = (android.media.AudioManager) getReactApplicationContext().getSystemService(Context.AUDIO_SERVICE);
-                String rate = am.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE);
-                if (rate != null) nativeSampleRate = Integer.parseInt(rate);
-                Log.d(TAG, "📱 Native Hardware Sample Rate: " + nativeSampleRate + " Hz");
-            } catch (Exception e) {}
+            // ROCK SOLID: Standardize to 48000Hz (Mac Native) 
+            int finalizedSampleRate = 48000;
 
             AudioFormat format = new AudioFormat.Builder()
-                    .setSampleRate(nativeSampleRate)
+                    .setSampleRate(finalizedSampleRate)
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                     .build();
+
+            int minBufferSize = AudioTrack.getMinBufferSize(finalizedSampleRate, 
+                    AudioFormat.CHANNEL_OUT_STEREO, 
+                    AudioFormat.ENCODING_PCM_16BIT);
 
             AudioTrack track = new AudioTrack.Builder()
                     .setAudioAttributes(attributes)
@@ -306,12 +300,12 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                     .build();
             
-            // STABILITY FIX: Use 1024 frames as the stable low-latency target. 
-            // 15ms (720 frames) was too aggressive for the environment. 1024 is approx 21ms.
+            // ROCK SOLID: Use 2048 frames for guaranteed stability. 
+            // (42ms at 48kHz). This is stable on almost all Android hardware.
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                int targetFrames = 1024; 
+                int targetFrames = 2048; 
                 int actualFrames = track.setBufferSizeInFrames(targetFrames);
-                Log.d(TAG, "✅ Stability Tuned: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
+                Log.d(TAG, "✅ Rock Solid Tuned: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
             }
             
             track.play();
