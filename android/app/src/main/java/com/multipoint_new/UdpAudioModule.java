@@ -461,17 +461,23 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                                 long diff = written - played;
                                 long bufferLatencyMs = (diff * 1000) / 48000;
                                 
-                                // v2.4.1: Add hidden system/BT latency
+                                // v2.4.1/v2.4.3: Add hidden system/BT latency
                                 int hiddenLatencyMs = getHiddenLatency(track);
                                 
                                 // v2.4.2: Probe for vendor-specific Bluetooth parameters
                                 int probeLatencyMs = getA2DPLatency();
                                 
-                                long totalLatencyMs = bufferLatencyMs + hiddenLatencyMs + probeLatencyMs;
+                                // v2.4.4: New detailed reporter (Buffer + Codec)
+                                int bufferMs = (int)bufferLatencyMs + hiddenLatencyMs + probeLatencyMs;
+                                int codecMs = detectCodecLatency(); // AAC default 180ms
+                                int totalMs = bufferMs + codecMs;
                                 
                                 WritableMap map = Arguments.createMap();
                                 map.putString("ip", ip);
-                                map.putDouble("latencyMs", (double) totalLatencyMs);
+                                map.putInt("bufferMs", bufferMs);
+                                map.putInt("codecMs", codecMs);
+                                map.putInt("totalMs", totalMs);
+                                map.putDouble("latencyMs", (double) totalMs); // Backward compatibility
                                 sendEvent("onLatencyUpdate", map);
                             }
                         }
@@ -479,6 +485,12 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                 }
             }
         }).start();
+    }
+
+    private int detectCodecLatency() {
+        // As confirmed by the user, AAC is active. 
+        // Future: Add real BluetoothCodecStatus detection here.
+        return 180; 
     }
 
     private int getHiddenLatency(AudioTrack track) {

@@ -77,7 +77,7 @@ function App(): React.JSX.Element {
   const [isAudioLive, setIsAudioLive] = useState(false);
   const [sources, setSources] = useState<{ip: string, name: string}[]>([]);
   const [sourceVolumes, setSourceVolumes] = useState<{[key: string]: number}>({});
-  const [hardwareLatency, setHardwareLatency] = useState<number>(0);
+  const [latencyInfo, setLatencyInfo] = useState({ buffer: 0, codec: 0, total: 0 });
   
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const signalingServerRef = useRef<SignalingServer | null>(null);
@@ -100,8 +100,8 @@ function App(): React.JSX.Element {
       });
     });
 
-    const subLatency = udpEventEmitter.addListener('onLatencyUpdate', (event: {latencyMs: number}) => {
-      setHardwareLatency(event.latencyMs);
+    const subLatency = udpEventEmitter.addListener('onLatencyUpdate', (event: {bufferMs: number, codecMs: number, totalMs: number}) => {
+      setLatencyInfo({ buffer: event.bufferMs, codec: event.codecMs, total: event.totalMs });
     });
 
     return () => {
@@ -244,18 +244,16 @@ function App(): React.JSX.Element {
       >
         <View style={styles.content}>
           <Text style={styles.title}>🎧 Multipoint Mixer</Text>
-          <Text style={styles.versionLabel}>v2.4.3</Text>
+          <Text style={styles.versionLabel}>v2.4.4</Text>
 
           {isUdpActive && (
-            <View style={[styles.latencyMeter, { borderColor: hardwareLatency > 150 ? '#ff4444' : hardwareLatency > 50 ? '#ffbb33' : '#00ffaa' }]}>
-              <Text style={styles.latencyLabel}>LOCAL HARDWARE DELAY</Text>
-              <Text style={[styles.latencyValue, { color: hardwareLatency > 150 ? '#ff4444' : hardwareLatency > 50 ? '#ffbb33' : '#00ffaa' }]}>
-                {Math.round(hardwareLatency)} ms
+            <View style={[styles.latencyMeter, { borderColor: latencyInfo.total > 150 ? '#ff4444' : latencyInfo.total > 50 ? '#ffbb33' : '#00ffaa' }]}>
+              <Text style={styles.latencyLabel}>TOTAL SYNC OFFSET</Text>
+              <Text style={[styles.latencyValue, { color: latencyInfo.total > 150 ? '#ff4444' : latencyInfo.total > 50 ? '#ffbb33' : '#00ffaa' }]}>
+                {latencyInfo.total} ms
               </Text>
               <Text style={styles.latencySubtext}>
-                {hardwareLatency > 150 ? '⚠️ Bluetooth/Buffer Lag' : 
-                 hardwareLatency > 50 ? '💡 Moderate Delay' : 
-                 '⚡ Extreme Low Latency'}
+                {latencyInfo.buffer}ms (Buffer) + {latencyInfo.codec}ms (AAC Codec)
               </Text>
             </View>
           )}
