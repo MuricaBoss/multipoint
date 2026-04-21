@@ -15,6 +15,14 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     var targetIP: String?
     private var customDeviceName: String = "Multipoint-Host"
     private var nameHeartbeatTask: Task<Void, Never>?
+    
+    // v3.0.0 Calibration Mode
+    private var calibrationTimer: Timer?
+    private var isCalibrating = false
+    private var syncOffsetMs: Double = 310.0
+    private var localSinePlayer: AVAudioPlayerNode?
+    private var audioEngine: AVAudioEngine?
+    private var calibrationUIElements = [NSView]()
 
     static func main() {
         let app = NSApplication.shared
@@ -92,40 +100,60 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
 
     func createMainWindow() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 220),
+            contentRect: NSRect(x: 0, y: 0, width: 350, height: 350),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.center()
-        window.title = "Multipoint Mixer: Transmitter"
+        window.title = "Multipoint Mixer: Transmitter (v3.0.0)"
         window.isReleasedWhenClosed = false
         
         let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = contentView
         
-        // Device Name Label
+        // --- DEVICE NAME SECTION ---
         let nameLabel = NSTextField(labelWithString: "DEVICE NAME:")
-        nameLabel.frame = NSRect(x: 20, y: 170, width: 100, height: 20)
-        nameLabel.font = .systemFont(ofSize: 12, weight: .bold)
+        nameLabel.frame = NSRect(x: 20, y: 170 + 130, width: 100, height: 20)
+        nameLabel.font = .systemFont(ofSize: 11, weight: .bold)
         contentView.addSubview(nameLabel)
         
         // Name Input field
-        let field = NSTextField(frame: NSRect(x: 20, y: 140, width: 230, height: 24))
+        let field = NSTextField(frame: NSRect(x: 20, y: 140 + 130, width: 230, height: 24))
         field.stringValue = customDeviceName
         field.font = .systemFont(ofSize: 14)
         contentView.addSubview(field)
         self.nameField = field
         
         // Save Button
-        let saveBtn = NSButton(title: "Save & Identity", target: self, action: #selector(saveNameFromWindow))
-        saveBtn.frame = NSRect(x: 255, y: 136, width: 80, height: 32)
+        let saveBtn = NSButton(title: "Save", target: self, action: #selector(saveNameFromWindow))
+        saveBtn.frame = NSRect(x: 255, y: 136 + 130, width: 80, height: 32)
         contentView.addSubview(saveBtn)
         
-        // Status Row
+        // --- CALIBRATION SECTION (v3.0.0) ---
+        let calTitle = NSTextField(labelWithString: "🔧 CALIBRATION MODE")
+        calTitle.frame = NSRect(x: 20, y: 220, width: 200, height: 20)
+        calTitle.font = .systemFont(ofSize: 12, weight: .bold)
+        calTitle.textColor = .systemBlue
+        contentView.addSubview(calTitle)
+        
+        let calSwitch = NSButton(checkboxWithTitle: "Enable Calibration Ticks", target: self, action: #selector(toggleCalibration))
+        calSwitch.frame = NSRect(x: 20, y: 195, width: 200, height: 20)
+        contentView.addSubview(calSwitch)
+        
+        let offsetLabel = NSTextField(labelWithString: "Sync Offset: 310 ms")
+        offsetLabel.frame = NSRect(x: 20, y: 170, width: 200, height: 20)
+        offsetLabel.tag = 601
+        contentView.addSubview(offsetLabel)
+        
+        let slider = NSSlider(value: 310.0, minValue: 0.0, maxValue: 1000.0, target: self, action: #selector(onSliderMove))
+        slider.frame = NSRect(x: 20, y: 145, width: 310, height: 20)
+        contentView.addSubview(slider)
+        
+        // --- STATUS SECTION ---
         let statusTitle = NSTextField(labelWithString: "STATUS:")
         statusTitle.frame = NSRect(x: 20, y: 100, width: 100, height: 20)
-        statusTitle.font = .systemFont(ofSize: 12, weight: .bold)
+        statusTitle.font = .systemFont(ofSize: 11, weight: .bold)
         contentView.addSubview(statusTitle)
         
         let statusText = NSTextField(labelWithString: "Searching for Android...")
@@ -139,7 +167,87 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         contentView.addSubview(manualBtn)
         
         self.mainWindow = window
-        window.makeKeyAndOrderFront(nil)
+        window.setFrame(NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: 350, height: 350), display: true)
+        window.makeKeyAndOrderFront(self)
+    }
+
+    @objc func toggleCalibration() {
+        isCalibrating = !isCalibrating
+        if isCalibrating {
+            startCalibrationLoop()
+        } else {
+            stopCalibrationLoop()
+        }
+    }
+
+    @objc func onSliderMove(_ sender: NSSlider) {
+        syncOffsetMs = sender.doubleValue
+        if let label = mainWindow?.contentView?.viewWithTag(601) as? NSTextField {
+            label.stringValue = "Sync Offset: \(Int(syncOffsetMs)) ms"
+        }
+    }
+
+    private func startCalibrationLoop() {
+        setupAudioEngine()
+        calibrationTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.triggerCalibrationCycle()
+        }
+    }
+
+    private func stopCalibrationLoop() {
+        calibrationTimer?.invalidate()
+        calibrationTimer = nil
+        audioEngine?.stop()
+    }
+
+    private func setupAudioEngine() {
+        if audioEngine != nil { return }
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        
+        let format = engine.mainMixerNode.outputFormat(forBus: 0)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        
+        do {
+            try engine.start()
+            self.audioEngine = engine
+            self.localSinePlayer = player
+        } catch {
+            print("❌ Calibration Audio Engine failed")
+        }
+    }
+
+    private func triggerCalibrationCycle() {
+        // 1. Send Remote Pulse (Android) IMMEDIATELY
+        captureManager.sendCalibrationPulse()
+        
+        // 2. Play Local Pulse (Mac Speaker) DELAYED
+        let delaySeconds = syncOffsetMs / 1000.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds) { [weak self] in
+            self?.playLocalTick()
+        }
+    }
+
+    private func playLocalTick() {
+        guard let player = localSinePlayer, let engine = audioEngine, engine.isRunning else { return }
+        
+        // Simple tick: 1kHz sine for 0.01s
+        let sampleRate = engine.mainMixerNode.outputFormat(forBus: 0).sampleRate
+        let frameCount = AVAudioFrameCount(sampleRate * 0.01)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: engine.mainMixerNode.outputFormat(forBus: 0), frameCapacity: frameCount) else { return }
+        
+        buffer.frameLength = frameCount
+        let channels = Int(buffer.format.channelCount)
+        for c in 0..<channels {
+            let data = buffer.floatChannelData![c]
+            for i in 0..<Int(frameCount) {
+                data[i] = sinf(Float(i) * 2.0 * Float.pi * 1000.0 / Float(sampleRate)) * 0.5
+            }
+        }
+        
+        player.play()
+        player.scheduleBuffer(buffer, completionHandler: nil)
     }
 
     @objc func saveNameFromWindow() {

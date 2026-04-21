@@ -158,18 +158,41 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
             if !pcmData.isEmpty {
                 // Inject Timestamp (Diagnostic Header)
                 let timestamp = Int64(Date().timeIntervalSince1970 * 1000)
-                var packetData = Data()
-                withUnsafeBytes(of: timestamp.bigEndian) { packetData.append(contentsOf: $0) }
-                packetData.append(pcmData)
-                
-                if var addr = targetAddress {
-                    let bytes = packetData.withUnsafeBytes { $0.baseAddress }
-                    if let bytes = bytes {
-                        sendto(udpSocket, bytes, packetData.count, 0, 
-                               withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
-                               socklen_t(MemoryLayout<sockaddr_in>.size))
-                    }
-                }
+                sendPacket(pcmData: pcmData, timestamp: timestamp)
+            }
+        }
+    }
+
+    func sendCalibrationPulse() {
+        // Generate 10ms of 1kHz square wave at 48kHz
+        let frameCount = 480 // 10ms
+        var samples = [Int16]()
+        samples.reserveCapacity(frameCount * 2)
+        
+        for i in 0..<frameCount {
+            // Square wave: 1kHz at 48kHz means 48 samples per cycle (24 high, 24 low)
+            let val = (i % 48 < 24) ? Int16(12000) : Int16(-12000)
+            samples.append(val) // L
+            samples.append(val) // R
+        }
+        
+        let pcmData = Data(bytes: samples, count: samples.count * 2)
+        let timestamp = Int64(Date().timeIntervalSince1970 * 1000)
+        sendPacket(pcmData: pcmData, timestamp: timestamp)
+        print("🔊 Calibration Pulse Sent to Android")
+    }
+
+    private func sendPacket(pcmData: Data, timestamp: Int64) {
+        var packetData = Data()
+        withUnsafeBytes(of: timestamp.bigEndian) { packetData.append(contentsOf: $0) }
+        packetData.append(pcmData)
+        
+        if var addr = targetAddress {
+            let bytes = packetData.withUnsafeBytes { $0.baseAddress }
+            if let bytes = bytes {
+                sendto(udpSocket, bytes, packetData.count, 0, 
+                       withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
+                       socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
     }

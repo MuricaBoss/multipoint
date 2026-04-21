@@ -356,7 +356,7 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
 
             int bufferSize = Math.max(AudioTrack.getMinBufferSize(nativeSampleRate, 
                     AudioFormat.CHANNEL_OUT_STEREO, 
-                    AudioFormat.ENCODING_PCM_16BIT), 240 * 2);
+                    AudioFormat.ENCODING_PCM_16BIT), 960 * 2); // v3.1.0: Larger base buffer
 
             AudioTrack track = new AudioTrack.Builder()
                     .setAudioAttributes(attributes)
@@ -369,7 +369,7 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
             // DEEP LATENCY: Use 240 frames (~5ms) for ultimate speed.
             // This requires high-frequency packets from Mac to avoid starvation.
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                int targetFrames = 240; 
+                int targetFrames = 960; // v3.1.0: Balanced for stability (20ms)
                 int actualFrames = track.setBufferSizeInFrames(targetFrames);
                 Log.d(TAG, "⚡️ Deep Latency Tuned: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
             }
