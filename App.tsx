@@ -52,7 +52,7 @@ function App(): React.JSX.Element {
     setStatus('Ready');
   }, []);
 
-  const toggleUdp = () => {
+  const toggleUdp = async () => {
     if (isUdpActive) {
       cleanup();
     } else {
@@ -60,6 +60,14 @@ function App(): React.JSX.Element {
       UdpAudio.startServer();
       setIsUdpActive(true);
       setStatus('UDP Receiving');
+      
+      // Fetch local IP for manual connection info
+      try {
+        const ip = await UdpAudio.getIPAddress();
+        setIpAddress(ip);
+      } catch (e) {
+        console.log('Native IP fetch failed, using fallback');
+      }
     }
   };
 

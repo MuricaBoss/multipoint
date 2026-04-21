@@ -10,19 +10,19 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			1FMkK0xTX/iDcCJ1exyiJ7PmHCo=
+			dhcPEVxmffUdQCd8CNGw9/UPotU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"d453242b4c535ff8837022757b1ca227b3e61c2a" or cdhash H"4eec6de65de7ff8edb696690f303ff135869f709"</string>
+			<string>cdhash H"76170f115c667df51d40277c08d1b0f7f50fa2d5" or cdhash H"a00f4f9907ec1a776169a97a1aba5a06e6927839"</string>
 		</dict>
 		<key>MacOS/WebRTC.framework</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			1FMkK0xTX/iDcCJ1exyiJ7PmHCo=
+			dhcPEVxmffUdQCd8CNGw9/UPotU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"d453242b4c535ff8837022757b1ca227b3e61c2a" or cdhash H"4eec6de65de7ff8edb696690f303ff135869f709"</string>
+			<string>cdhash H"76170f115c667df51d40277c08d1b0f7f50fa2d5" or cdhash H"a00f4f9907ec1a776169a97a1aba5a06e6927839"</string>
 		</dict>
 	</dict>
 	<key>rules</key>

@@ -1,18 +1,12 @@
 import Foundation
 import ScreenCaptureKit
 import AVFoundation
-import WebRTC
 
 class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
-    private var dataChannel: RTCDataChannel?
     
     override init() {
         super.init()
-    }
-    
-    func setDataChannel(_ dataChannel: RTCDataChannel) {
-        self.dataChannel = dataChannel
     }
     
     private var udpSocket: Int32 = -1
@@ -67,9 +61,7 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     // SCStreamOutput Delegate
     @objc func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         if type == .audio {
-            let hasUDP = (udpSocket >= 0)
-            let hasRTC = (dataChannel?.readyState == .open)
-            guard hasUDP || hasRTC else { return }
+            guard udpSocket >= 0 else { return }
             
             var blockBuffer: CMBlockBuffer?
             let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
@@ -137,18 +129,13 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
             
             let data = Data(bytes: interleavedInt16, count: interleavedInt16.count * 2)
             
-            // EXCLUSIVE MODE: UDP OR WebRTC
-            if udpSocket >= 0, var addr = targetAddress {
+            if var addr = targetAddress {
                 let bytes = data.withUnsafeBytes { $0.baseAddress }
                 if let bytes = bytes {
                     sendto(udpSocket, bytes, data.count, 0, 
                            withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
                            socklen_t(MemoryLayout<sockaddr_in>.size))
                 }
-            } else if let channel = dataChannel {
-                let base64String = data.base64EncodedString()
-                let buffer = RTCDataBuffer(data: base64String.data(using: .utf8)!, isBinary: false)
-                channel.sendData(buffer)
             }
         }
     }
