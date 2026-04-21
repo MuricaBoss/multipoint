@@ -33,6 +33,9 @@ import android.util.Log;
 
 public class UdpAudioModule extends ReactContextBaseJavaModule {
     private Map<String, AudioTrack> playerMap = new HashMap<>();
+    private int packetCount = 0;
+    private long clockOffset = 0;
+    private long rtt = 0;
     private Map<String, String> deviceNames = new HashMap<>();
     private Map<String, Long> lastActivity = new HashMap<>();
     private DatagramSocket socket;
@@ -220,21 +223,37 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
 
                         AudioTrack track = getOrCreateTrack(senderIp, 48000);
                         if (track != null && isRunning && length > 8) {
-                            // DIAGNOSTIC: Extract 8-byte timestamp (Big Endian)
+                            // Check for PONG response (v2.1.0)
+                            if (length > 13 && new String(buffer, 0, 5).equals("PONG:")) {
+                                try {
+                                    String msg = new String(buffer, 0, length, StandardCharsets.UTF_8);
+                                    long sentTime = Long.parseLong(msg.substring(5));
+                                    rtt = System.currentTimeMillis() - sentTime;
+                                } catch (Exception e) {}
+                                continue;
+                            }
+
+                            // DIAGNOSTIC (v2.0.0): Extract 8-byte timestamp
                             long remoteTime = 0;
                             for (int i = 0; i < 8; i++) {
                                 remoteTime = (remoteTime << 8) | (buffer[i] & 0xFF);
                             }
-                            long localTime = System.currentTimeMillis();
-                            long transitTime = localTime - remoteTime;
                             
-                            // Log latency every 300 packets (~1.5 seconds)
+                            long localTime = System.currentTimeMillis();
+                            
+                            // COMPENSATED LATENCY (v2.1.0)
+                            // We estimate clockOffset during the first few packets or use RTT
+                            if (clockOffset == 0 || packetCount % 1000 == 0) {
+                                clockOffset = localTime - (remoteTime + (rtt / 2));
+                            }
+                            
+                            long trueTransit = (localTime - remoteTime) - clockOffset;
+                            
                             packetCount++;
                             if (packetCount % 300 == 0) {
-                                Log.d(TAG, "⏱ Latency Diagnostic: Network Transit = " + transitTime + "ms");
+                                Log.d(TAG, "🟢 RTT: " + rtt + "ms | True Transit: " + trueTransit + "ms | Offset: " + clockOffset + "ms");
                             }
 
-                            // Skip the 8-byte timestamp header for audio playback
                             track.write(buffer, 8, length - 8);
                         }
                     }
@@ -242,6 +261,27 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     if (isRunning) Log.e(TAG, "❌ Audio Port Error: " + e.getMessage());
                 } finally {
                     stopServerInternal();
+                }
+            }
+        }).start();
+
+        // v2.1.0: PING Generator Thread
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (isRunning) {
+                    try {
+                        Thread.sleep(2000);
+                        if (socket != null && !lastActivity.isEmpty()) {
+                            long now = System.currentTimeMillis();
+                            byte[] pingData = ("PING:" + now).getBytes(StandardCharsets.UTF_8);
+                            for (String ip : lastActivity.keySet()) {
+                                DatagramPacket ping = new DatagramPacket(pingData, pingData.length, 
+                                        java.net.InetAddress.getByName(ip), 9999);
+                                socket.send(ping);
+                            }
+                        }
+                    } catch (Exception e) {}
                 }
             }
         }).start();

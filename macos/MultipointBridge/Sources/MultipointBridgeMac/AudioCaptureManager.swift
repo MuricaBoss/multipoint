@@ -28,6 +28,37 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         addr.sin_addr.s_addr = inet_addr(ip)
         targetAddress = addr
         print("📡 UDP Target Set: \(ip):\(port)")
+        
+        // v2.1.0: Start the Pong Reflector listener
+        startPongReflector()
+    }
+    
+    private func startPongReflector() {
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            guard let self = self else { return }
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            while self.udpSocket >= 0 {
+                var remoteAddr = sockaddr()
+                var addrLen = socklen_t(MemoryLayout<sockaddr>.size)
+                let bytesRead = recvfrom(self.udpSocket, &buffer, buffer.count, 0, &remoteAddr, &addrLen)
+                
+                if bytesRead > 5 {
+                    let receivedData = Data(bytes: buffer, count: bytesRead)
+                    if let msg = String(data: receivedData, encoding: .utf8), msg.hasPrefix("PING:") {
+                        // Reflect as PONG
+                        let pongMsg = msg.replacingOccurrences(of: "PING:", with: "PONG:")
+                        let pongData = pongMsg.data(using: .utf8)
+                        if let d = pongData {
+                            d.withUnsafeBytes { ptr in
+                                if let base = ptr.baseAddress {
+                                    sendto(self.udpSocket, base, d.count, 0, &remoteAddr, addrLen)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     func stopCapture() {
