@@ -13,6 +13,19 @@ struct MultipointBridgeMac {
         let client = SignalingClient(androidIP: androidIP)
         let webRTCManager = WebRTCManager()
         
+        if CommandLine.arguments.count > 1 {
+            let targetIP = CommandLine.arguments[1]
+            webRTCManager.audioCaptureManager.setTargetIP(targetIP)
+            print("🚀 UDP Mode Enabled: Direct streaming to \(targetIP)")
+            Task {
+                try? await webRTCManager.audioCaptureManager.startCapture()
+            }
+            
+            // In UDP mode, we don't need WebRTC signaling
+            RunLoop.main.run()
+            return
+        }
+        
         print("📡 Creating WebRTC Offer...")
         do {
             let sdp = try await webRTCManager.createOffer()
@@ -54,22 +67,19 @@ struct MultipointBridgeMac {
             }
 
             // 3. Start Audio Capture
-            var captureManager: AudioCaptureManager? = nil
             if let dataChannel = webRTCManager.dataChannel {
                 print("🎙️ Initializing Audio Capture...")
-                let manager = AudioCaptureManager(dataChannel: dataChannel)
-                captureManager = manager
+                webRTCManager.audioCaptureManager.setDataChannel(dataChannel)
                 do {
-                    try await manager.startCapture()
-                    print("🟢 Streaming started. Press Ctrl+C to stop.")
+                    try await webRTCManager.audioCaptureManager.startCapture()
+                    print("🟢 Streaming started via RTC. Press Ctrl+C to stop.")
                 } catch {
-                    print("❌ Audio Capture Error: \(error.localizedDescription)")
+                    print("❌ Capture Error: \(error)")
                 }
             }
             
             while true {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                _ = captureManager // Keep it alive
             }
         } catch {
             print("❌ Error: \(error)")
@@ -85,6 +95,7 @@ class WebRTCManager: NSObject, RTCPeerConnectionDelegate {
     var audioSource: RTCAudioSource?
     var dataChannel: RTCDataChannel?
     let factory: RTCPeerConnectionFactory
+    let audioCaptureManager = AudioCaptureManager()
     
     override init() {
         RTCInitializeSSL()
@@ -106,6 +117,7 @@ class WebRTCManager: NSObject, RTCPeerConnectionDelegate {
         dataChannelConfig.isOrdered = false // Best for streaming
         dataChannelConfig.maxRetransmits = 0 // Best for low latency
         dataChannel = peerConnection?.dataChannel(forLabel: "audio-stream", configuration: dataChannelConfig)
+        dataChannel?.delegate = self
         
         // We don't add a microphone track, only the data channel for system audio
         
@@ -151,4 +163,19 @@ class WebRTCManager: NSObject, RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
+}
+
+extension WebRTCManager: RTCDataChannelDelegate {
+    func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
+        print("📺 DataChannel State: \(dataChannel.readyState.rawValue)")
+        if dataChannel.readyState == .open {
+            print("🚀 Starting Audio Capture...")
+            self.audioCaptureManager.setDataChannel(dataChannel)
+            Task {
+                try? await self.audioCaptureManager.startCapture()
+            }
+        }
+    }
+    
+    func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {}
 }

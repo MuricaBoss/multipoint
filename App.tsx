@@ -19,8 +19,13 @@ function App(): React.JSX.Element {
   const [status, setStatus] = useState<string>('Ready');
   const [isConnected, setIsConnected] = useState(false);
   
+  const [isUdpActive, setIsUdpActive] = useState(false);
+  
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const signalingServerRef = useRef<SignalingServer | null>(null);
+
+  const { NativeModules } = require('react-native');
+  const { UdpAudio } = NativeModules;
 
   const cleanup = useCallback(() => {
     if (pcRef.current) {
@@ -31,9 +36,21 @@ function App(): React.JSX.Element {
       signalingServerRef.current.stop();
       signalingServerRef.current = null;
     }
+    UdpAudio.stopServer();
+    setIsUdpActive(false);
     setIsConnected(false);
     setStatus('Ready');
   }, []);
+
+  const toggleUdp = () => {
+    if (isUdpActive) {
+      cleanup();
+    } else {
+      cleanup();
+      UdpAudio.startServer();
+      setIsUdpActive(true);
+    }
+  };
 
   const handleCandidate = useCallback((candidate: RTCIceCandidate) => {
     if (pcRef.current) {
@@ -143,12 +160,25 @@ function App(): React.JSX.Element {
           onPress={toggleConnection}
         >
           <Text style={styles.buttonText}>
-            {status === 'Ready' ? 'Start Listening' : 'Stop'}
+            {status === 'Ready' ? 'Start WebRTC' : 'Stop WebRTC'}
+          </Text>
+        </TouchableOpacity>
+
+        <View style={{height: 20}} />
+
+        <TouchableOpacity 
+          style={[styles.button, isUdpActive && {backgroundColor: '#ff9500'}]} 
+          onPress={toggleUdp}
+        >
+          <Text style={styles.buttonText}>
+            {isUdpActive ? 'Stop UDP Server' : 'Start UDP Mode'}
           </Text>
         </TouchableOpacity>
         
-        {isConnected && (
-            <Text style={styles.hint}>Streaming from Mac...</Text>
+        {(isConnected || isUdpActive) && (
+            <Text style={styles.hint}>
+              {isUdpActive ? 'UDP Server listening on port 9999' : 'Streaming from Mac via WebRTC...'}
+            </Text>
         )}
       </View>
     </SafeAreaView>

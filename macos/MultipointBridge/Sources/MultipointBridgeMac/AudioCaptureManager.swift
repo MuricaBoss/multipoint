@@ -5,13 +5,29 @@ import WebRTC
 
 class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
-    private let dataChannel: RTCDataChannel
+    private var dataChannel: RTCDataChannel?
     
-    init(dataChannel: RTCDataChannel) {
-        self.dataChannel = dataChannel
+    override init() {
         super.init()
     }
     
+    func setDataChannel(_ dataChannel: RTCDataChannel) {
+        self.dataChannel = dataChannel
+    }
+    
+    private var udpSocket: Int32 = -1
+    private var targetAddress: sockaddr_in?
+
+    func setTargetIP(_ ip: String) {
+        udpSocket = socket(AF_INET, SOCK_DGRAM, 0)
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(9999).bigEndian
+        addr.sin_addr.s_addr = inet_addr(ip)
+        targetAddress = addr
+        print("📡 UDP Target Set: \(ip):9999")
+    }
+
     func startCapture() async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         
@@ -30,7 +46,7 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         config.channelCount = 2 // Stereo
         config.width = 100
         config.height = 100
-        config.queueDepth = 10
+        config.queueDepth = 5 // Balanced latency
         
         stream = SCStream(filter: filter, configuration: config, delegate: self)
         let captureQueue = DispatchQueue(label: "com.antigravity.audioCapture", qos: .userInteractive)
@@ -46,7 +62,9 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     // SCStreamOutput Delegate
     @objc func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         if type == .audio {
-            guard dataChannel.readyState == .open else { return }
+            let hasUDP = (udpSocket >= 0)
+            let hasRTC = (dataChannel?.readyState == .open)
+            guard hasUDP || hasRTC else { return }
             
             var blockBuffer: CMBlockBuffer?
             let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
@@ -99,9 +117,20 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             
             let data = Data(bytes: interleavedInt16, count: interleavedInt16.count * 2)
-            let base64String = data.base64EncodedString()
-            let buffer = RTCDataBuffer(data: base64String.data(using: .utf8)!, isBinary: false)
-            dataChannel.sendData(buffer)
+            
+            // EXCLUSIVE MODE: UDP OR WebRTC
+            if udpSocket >= 0, var addr = targetAddress {
+                let bytes = data.withUnsafeBytes { $0.baseAddress }
+                if let bytes = bytes {
+                    sendto(udpSocket, bytes, data.count, 0, 
+                           withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
+                           socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            } else if let channel = dataChannel {
+                let base64String = data.base64EncodedString()
+                let buffer = RTCDataBuffer(data: base64String.data(using: .utf8)!, isBinary: false)
+                channel.sendData(buffer)
+            }
         }
     }
     

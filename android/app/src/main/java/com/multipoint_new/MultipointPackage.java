@@ -18,6 +18,7 @@ public class MultipointPackage implements ReactPackage {
     public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
         List<NativeModule> modules = new ArrayList<>();
         modules.add(new PcmPlayerModule(reactContext));
+        modules.add(new UdpAudioModule(reactContext));
         return modules;
     }
 }
