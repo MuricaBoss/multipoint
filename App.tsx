@@ -9,7 +9,10 @@ import {
   TouchableOpacity,
   NativeModules,
   NativeEventEmitter,
+  Dimensions,
+  ScrollView,
 } from 'react-native';
+import Slider from '@react-native-community/slider';
 import {NetworkInfo} from 'react-native-network-info';
 import { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, MediaStream } from 'react-native-webrtc';
 import { createPeerConnection } from './src/utils/webrtc';
@@ -18,6 +21,53 @@ import { SignalingServer, SignalingDelegate } from './src/native/SignalingServer
 const { UdpAudio, PcmPlayer } = NativeModules;
 const udpEventEmitter = new NativeEventEmitter(UdpAudio);
 
+const MixerControl = ({ ip, name, initialValue, onVolumeChange }: { ip: string, name: string, initialValue: number, onVolumeChange: (ip: string, val: number) => void }) => {
+  const [localVal, setLocalVal] = useState(initialValue);
+
+  const adjustVolume = (delta: number) => {
+    const newVal = Math.min(1.0, Math.max(0.0, localVal + delta));
+    setLocalVal(newVal);
+    onVolumeChange(ip, newVal);
+  };
+
+  return (
+    <View style={styles.sourceCard}>
+      <Text style={styles.hugeName} numberOfLines={1}>
+        {name || "IDENTIFIED DEVICE"}
+      </Text>
+      
+      <View style={styles.controlRow}>
+        <TouchableOpacity 
+          style={styles.volBtn} 
+          onPress={() => adjustVolume(-0.1)}
+        >
+          <Text style={styles.volBtnText}>-</Text>
+        </TouchableOpacity>
+
+        <View style={styles.volDisplay}>
+          <Text style={styles.volPercent}>{Math.round(localVal * 100)}%</Text>
+          <Text style={styles.volLabel}>VOLUME</Text>
+        </View>
+
+        <TouchableOpacity 
+          style={styles.volBtn} 
+          onPress={() => adjustVolume(0.1)}
+        >
+          <Text style={styles.volBtnText}>+</Text>
+        </TouchableOpacity>
+      </View>
+      
+      <View style={styles.cardFooter}>
+        <View style={styles.liveIndicator}>
+          <View style={styles.dotActive} />
+          <Text style={styles.liveText}>LIVE</Text>
+        </View>
+        <Text style={styles.ipBadge}>IP: {ip}</Text>
+      </View>
+    </View>
+  );
+};
+
 function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
   const [ipAddress, setIpAddress] = useState<string | null>(null);
@@ -25,16 +75,40 @@ function App(): React.JSX.Element {
   const [isConnected, setIsConnected] = useState(false);
   const [isUdpActive, setIsUdpActive] = useState(false);
   const [isAudioLive, setIsAudioLive] = useState(false);
+  const [sources, setSources] = useState<{ip: string, name: string}[]>([]);
+  const [sourceVolumes, setSourceVolumes] = useState<{[key: string]: number}>({});
   
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const signalingServerRef = useRef<SignalingServer | null>(null);
 
   useEffect(() => {
-    const sub = udpEventEmitter.addListener('onAudioActive', (isActive) => {
+    const subActive = udpEventEmitter.addListener('onAudioActive', (isActive) => {
       setIsAudioLive(isActive);
     });
-    return () => sub.remove();
+
+    const subSources = udpEventEmitter.addListener('onSourcesChanged', (newSources: {ip: string, name: string}[]) => {
+      console.log('Sources Changed:', newSources);
+      setSources(newSources);
+      // Initialize volumes for new sources
+      setSourceVolumes(prev => {
+        const next = { ...prev };
+        newSources.forEach(s => {
+          if (next[s.ip] === undefined) next[s.ip] = 1.0;
+        });
+        return next;
+      });
+    });
+
+    return () => {
+      subActive.remove();
+      subSources.remove();
+    };
   }, []);
+
+  const handleVolumeChange = (ip: string, val: number) => {
+    setSourceVolumes(prev => ({ ...prev, [ip]: val }));
+    UdpAudio.setSourceVolume(ip, val);
+  };
 
   const cleanup = useCallback(() => {
     if (pcRef.current) {
@@ -49,6 +123,7 @@ function App(): React.JSX.Element {
     setIsUdpActive(false);
     setIsConnected(false);
     setIsAudioLive(false);
+    setSources([]);
     setStatus('Ready');
   }, []);
 
@@ -61,7 +136,6 @@ function App(): React.JSX.Element {
       setIsUdpActive(true);
       setStatus('UDP Receiving');
       
-      // Fetch local IP for manual connection info
       try {
         const ip = await UdpAudio.getIPAddress();
         setIpAddress(ip);
@@ -157,52 +231,68 @@ function App(): React.JSX.Element {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <View style={styles.content}>
-        <Text style={styles.title}>🎧 Multipoint Bridge</Text>
-        
-        <View style={styles.card}>
-          <Text style={styles.label}>Your IP Address</Text>
-          <Text style={styles.ip}>{ipAddress || 'Detecting...'}</Text>
-        </View>
+      <ScrollView 
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.content}>
+          <Text style={styles.title}>🎧 Multipoint Mixer</Text>
+          <Text style={styles.versionLabel}>v1.2.0</Text>
 
-        <View style={styles.infoRow}>
-          <View style={[styles.dot, isConnected && styles.dotActive]} />
-          <Text style={styles.status}>Status: {status}</Text>
-        </View>
-
-        {isUdpActive && (
-          <View style={[styles.activityRow, { marginBottom: 20 }]}>
-            <View style={[styles.dot, isAudioLive && { backgroundColor: '#4caf50', shadowColor: '#4caf50', shadowRadius: 10, elevation: 5 }]} />
-            <Text style={[styles.status, { color: isAudioLive ? '#4caf50' : '#757575' }]}>
-              {isAudioLive ? 'Audio Signal: Active' : 'Audio Signal: Idling'}
-            </Text>
+          <View style={styles.card}>
+            <Text style={styles.label}>Your IP Address</Text>
+            <Text style={styles.ip}>{ipAddress || 'Detecting...'}</Text>
           </View>
-        )}
 
-        {isUdpActive && (
-          <View style={[styles.activityRow, { marginBottom: 20 }]}>
-            <View style={[styles.dot, isAudioLive && { backgroundColor: '#4caf50', shadowColor: '#4caf50', shadowRadius: 10, elevation: 5 }]} />
-            <Text style={[styles.status, { color: isAudioLive ? '#4caf50' : '#757575' }]}>
-              {isAudioLive ? 'Audio Signal: Active' : 'Audio Signal: Idling'}
-            </Text>
+          <View style={styles.infoRow}>
+            <View style={[styles.dot, isConnected && styles.dotActive]} />
+            <Text style={styles.status}>Status: {status}</Text>
           </View>
-        )}
 
-        <TouchableOpacity 
-          style={[styles.button, isUdpActive && {backgroundColor: '#ff9500'}]} 
-          onPress={toggleUdp}
-        >
-          <Text style={styles.buttonText}>
-            {isUdpActive ? 'Stop Service' : 'Start Multipoint Audio'}
-          </Text>
-        </TouchableOpacity>
-        
-        {isUdpActive && (
-            <Text style={styles.hint}>
-              Listening for audio from Mac/Windows on port 9999
+          {isUdpActive && (
+            <View style={styles.mixerSection}>
+              <Text style={styles.mixerTitle}>Connected Sources ({sources.length})</Text>
+              {sources.length === 0 ? (
+                <Text style={styles.emptyMixer}>Waiting for audio streams...</Text>
+              ) : (
+                sources.map(s => (
+                  <MixerControl 
+                    key={s.ip} 
+                    ip={s.ip} 
+                    name={s.name} 
+                    initialValue={sourceVolumes[s.ip] || 1.0}
+                    onVolumeChange={handleVolumeChange}
+                  />
+                ))
+               )}
+            </View>
+          )}
+
+          {isUdpActive && !sources.length && (
+            <View style={[styles.activityRow, { marginBottom: 20 }]}>
+              <View style={[styles.dot, isAudioLive && { backgroundColor: '#4caf50', shadowColor: '#4caf50', shadowRadius: 10, elevation: 5 }]} />
+              <Text style={[styles.status, { color: isAudioLive ? '#4caf50' : '#757575' }]}>
+                {isAudioLive ? 'Audio Signal: Active' : 'Audio Signal: Idling'}
+              </Text>
+            </View>
+          )}
+
+          <TouchableOpacity 
+            style={[styles.button, isUdpActive && {backgroundColor: '#ff9500'}]} 
+            onPress={toggleUdp}
+          >
+            <Text style={styles.buttonText}>
+              {isUdpActive ? 'Stop Mixer Service' : 'Start Multipoint Mixer'}
             </Text>
-        )}
-      </View>
+          </TouchableOpacity>
+          
+          {isUdpActive && (
+              <Text style={styles.hint}>
+                Listening for audio from identified network sources.
+              </Text>
+          )}
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -212,57 +302,57 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0a0a0a',
   },
+  scrollContent: {
+    paddingBottom: 50,
+  },
   content: {
-    flex: 1,
-    padding: 32,
-    justifyContent: 'center',
-    alignItems: 'center',
+    padding: 24,
+    alignItems: 'stretch',
   },
   title: {
     fontSize: 32,
     fontWeight: '900',
     color: '#ffffff',
-    marginBottom: 64,
-    letterSpacing: -0.5,
+    marginTop: 20,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  versionLabel: {
+    fontSize: 14,
+    color: '#00ccff',
+    fontWeight: 'bold',
+    textAlign: 'center',
+    marginBottom: 40,
+    opacity: 0.8,
   },
   card: {
     backgroundColor: '#161616',
     borderRadius: 24,
-    padding: 32,
-    width: '100%',
+    padding: 24,
     alignItems: 'center',
-    marginBottom: 48,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.5,
-    shadowRadius: 20,
-    elevation: 10,
+    marginBottom: 32,
     borderWidth: 1,
     borderColor: '#222',
   },
   label: {
     color: '#666',
-    fontSize: 12,
-    fontWeight: '700',
-    marginBottom: 12,
-    textTransform: 'uppercase',
+    fontSize: 10,
+    fontWeight: '900',
     letterSpacing: 2,
+    marginBottom: 8,
+    textTransform: 'uppercase',
   },
   ip: {
     color: '#00ccff',
-    fontSize: 28,
-    fontWeight: '700',
+    fontSize: 24,
+    fontWeight: 'bold',
     fontFamily: 'monospace',
   },
   infoRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 48,
-  },
-  activityRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
+    justifyContent: 'center',
+    marginBottom: 40,
   },
   dot: {
     width: 10,
@@ -275,18 +365,120 @@ const styles = StyleSheet.create({
     backgroundColor: '#00ffaa',
     shadowColor: '#00ffaa',
     shadowRadius: 10,
-    elevation: 5,
+    elevation: 8,
+  },
+  status: {
+    color: '#eee',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  mixerSection: {
+    marginBottom: 40,
+  },
+  mixerTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    opacity: 0.9,
+  },
+  sourceCard: {
+    backgroundColor: '#1c1c1e',
+    borderRadius: 24,
+    padding: 24,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#333',
+    elevation: 4,
+  },
+  hugeName: {
+    color: '#00ccff',
+    fontSize: 28,
+    fontWeight: '900',
+    marginBottom: 24,
+    textAlign: 'center',
+  },
+  controlRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+  },
+  volBtn: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: '#2c2c2e',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#444',
+  },
+  volBtnText: {
+    color: '#fff',
+    fontSize: 36,
+    fontWeight: '300',
+  },
+  volDisplay: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  volPercent: {
+    color: '#fff',
+    fontSize: 36,
+    fontWeight: 'bold',
+  },
+  volLabel: {
+    color: '#666',
+    fontSize: 10,
+    fontWeight: 'bold',
+    marginTop: 4,
+    letterSpacing: 1,
+  },
+  cardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: '#333',
+    paddingTop: 16,
+  },
+  liveIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#4caf5020',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  liveText: {
+    color: '#4caf50',
+    fontSize: 10,
+    fontWeight: '900',
+    marginLeft: 6,
+  },
+  ipBadge: {
+    color: '#555',
+    fontSize: 11,
+    fontFamily: 'monospace',
+  },
+  activityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 32,
   },
   button: {
     backgroundColor: '#00ccff',
-    paddingVertical: 18,
-    paddingHorizontal: 54,
+    paddingVertical: 20,
     borderRadius: 40,
+    alignItems: 'center',
     shadowColor: '#00ccff',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
     elevation: 8,
+    marginBottom: 16,
   },
   buttonActive: {
     backgroundColor: '#ff3b30',
@@ -294,20 +486,23 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: '#000',
-    fontSize: 20,
-    fontWeight: '800',
-  },
-  status: {
     fontSize: 18,
-    color: '#ddd',
-    fontWeight: '500',
+    fontWeight: '900',
+    letterSpacing: 1,
   },
   hint: {
-    marginTop: 20,
-    color: '#00ffaa',
-    fontSize: 14,
-    fontWeight: '600',
-  }
+    color: '#444',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 8,
+    fontStyle: 'italic',
+  },
+  emptyMixer: {
+    color: '#444',
+    textAlign: 'center',
+    paddingVertical: 40,
+    fontSize: 15,
+  },
 });
 
 export default App;

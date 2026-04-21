@@ -7,6 +7,9 @@ import android.media.AudioTrack;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.bridge.WritableArray;
+import com.facebook.react.bridge.Arguments;
+import android.os.Build;
 
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
@@ -15,10 +18,14 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Timer;
+import java.util.TimerTask;
 import com.facebook.react.bridge.Promise;
 
 import android.net.wifi.WifiManager;
@@ -26,13 +33,55 @@ import android.util.Log;
 
 public class UdpAudioModule extends ReactContextBaseJavaModule {
     private Map<String, AudioTrack> playerMap = new HashMap<>();
+    private Map<String, String> deviceNames = new HashMap<>();
+    private Map<String, Long> lastActivity = new HashMap<>();
     private DatagramSocket socket;
+    private DatagramSocket metaSocket;
     private boolean isRunning = false;
     private int port = 9999;
+    private int metaPort = 9998;
+    private Timer cleanupTimer;
+
     private NsdManager nsdManager;
     private NsdManager.RegistrationListener registrationListener;
     private WifiManager.MulticastLock multicastLock;
     private static final String TAG = "MultipointUDP";
+
+    private String normalizeIp(String ip) {
+        if (ip == null) return null;
+        if (ip.startsWith("::ffff:")) return ip.substring(7);
+        return ip;
+    }
+
+    private void startCleanupTimer() {
+        cleanupTimer = new Timer();
+        cleanupTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                long now = System.currentTimeMillis();
+                boolean changed = false;
+                synchronized (playerMap) {
+                    Iterator<Map.Entry<String, Long>> it = lastActivity.entrySet().iterator();
+                    while (it.hasNext()) {
+                        Map.Entry<String, Long> entry = it.next();
+                        if (now - entry.getValue() > 10000) { // 10s timeout
+                            String ip = normalizeIp(entry.getKey());
+                            Log.d(TAG, "🏚️ Removing stale source: " + ip);
+                            AudioTrack track = playerMap.get(ip);
+                            if (track != null) {
+                                try { track.stop(); track.release(); } catch (Exception e) {}
+                                playerMap.remove(ip);
+                            }
+                            deviceNames.remove(ip);
+                            it.remove();
+                            changed = true;
+                        }
+                    }
+                }
+                if (changed) emitSources();
+            }
+        }, 5000, 5000);
+    }
 
     public UdpAudioModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -41,6 +90,57 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
     @Override
     public String getName() {
         return "UdpAudio";
+    }
+
+    private String lastEmittedSources = "";
+
+    private void emitSources() {
+        WritableArray array = Arguments.createArray();
+        StringBuilder sb = new StringBuilder();
+        
+        synchronized (lastActivity) {
+            if (lastActivity.isEmpty()) {
+                if (!lastEmittedSources.equals("[]")) {
+                    sendEvent("onSourcesChanged", array);
+                    lastEmittedSources = "[]";
+                }
+                return;
+            }
+            
+            List<String> sortedIps = new java.util.ArrayList<>(lastActivity.keySet());
+            java.util.Collections.sort(sortedIps);
+
+            for (String ip : sortedIps) {
+                com.facebook.react.bridge.WritableMap map = Arguments.createMap();
+                map.putString("ip", ip);
+                String name = deviceNames.get(ip);
+                String displayName = name != null ? name : ip;
+                map.putString("name", displayName);
+                array.pushMap(map);
+                sb.append(ip).append(":").append(displayName).append(";");
+            }
+        }
+        
+        String currentSources = sb.toString();
+        if (!currentSources.equals(lastEmittedSources)) {
+            sendEvent("onSourcesChanged", array);
+            lastEmittedSources = currentSources;
+            Log.d(TAG, "📱 UI Updated with sources: " + currentSources);
+        }
+    }
+
+    @ReactMethod
+    public void setSourceVolume(String ip, float volume) {
+        AudioTrack track = playerMap.get(ip);
+        if (track != null) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    track.setVolume(volume);
+                } else {
+                    track.setStereoVolume(volume, volume);
+                }
+            } catch (Exception e) {}
+        }
     }
 
     private void registerService(int port) {
@@ -95,32 +195,67 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         isRunning = true;
         
         registerService(9999);
+        startCleanupTimer();
 
+        // 1. Audio Data Thread (Port 9999)
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    socket = new DatagramSocket(9999);
-                    socket.setReceiveBufferSize(512 * 1024);
-                    
-                    final int sampleRate = 48000;
-                    byte[] pktBuffer = new byte[8192];
+                    socket = new DatagramSocket(null);
+                    socket.setReuseAddress(true);
+                    socket.bind(new java.net.InetSocketAddress(9999));
+                    socket.setReceiveBufferSize(1024 * 1024);
+                    byte[] buffer = new byte[8192];
                     
                     while (isRunning) {
-                        DatagramPacket packet = new DatagramPacket(pktBuffer, pktBuffer.length);
+                        DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                         socket.receive(packet);
-                        
-                        String senderIp = packet.getAddress().getHostAddress();
-                        AudioTrack track = getOrCreateTrack(senderIp, sampleRate);
-                        
+                        String senderIp = normalizeIp(packet.getAddress().getHostAddress());
+                        int length = packet.getLength();
+                        lastActivity.put(senderIp, System.currentTimeMillis());
+
+                        AudioTrack track = getOrCreateTrack(senderIp, 48000);
                         if (track != null && isRunning) {
-                            track.write(packet.getData(), 0, packet.getLength());
+                            track.write(buffer, 0, length);
                         }
                     }
                 } catch (Exception e) {
-                    if (isRunning) e.printStackTrace();
+                    if (isRunning) Log.e(TAG, "❌ Audio Port Error: " + e.getMessage());
                 } finally {
                     stopServerInternal();
+                }
+            }
+        }).start();
+
+        // 2. Metadata Thread (Port 9998)
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    metaSocket = new DatagramSocket(null);
+                    metaSocket.setReuseAddress(true);
+                    metaSocket.bind(new java.net.InetSocketAddress(9998));
+                    byte[] buffer = new byte[1024];
+                    while (isRunning) {
+                        DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                        metaSocket.receive(packet);
+                        String senderIp = normalizeIp(packet.getAddress().getHostAddress());
+                        String msg = new String(buffer, 0, packet.getLength(), StandardCharsets.UTF_8);
+                        
+                        if (msg.startsWith("MSG:NAME:")) {
+                            // Extract name and strip any null bytes or trailing spaces that cause comparison failures
+                            String rawName = msg.substring(9).replace("\0", "").trim();
+                            if (!rawName.isEmpty()) {
+                                deviceNames.put(senderIp, rawName);
+                                lastActivity.put(senderIp, System.currentTimeMillis());
+                                emitSources();
+                                Log.d(TAG, "👤 Metadata: [" + rawName + "] from " + senderIp);
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    if (isRunning) Log.e(TAG, "❌ Meta Port Error: " + e.getMessage());
                 }
             }
         }).start();
@@ -132,6 +267,10 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         }
 
         try {
+            int minBufferSize = AudioTrack.getMinBufferSize(sampleRate, 
+                    AudioFormat.CHANNEL_OUT_STEREO, 
+                    AudioFormat.ENCODING_PCM_16BIT);
+
             AudioAttributes attributes = new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -144,10 +283,6 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                     .build();
 
-            int minBufferSize = AudioTrack.getMinBufferSize(sampleRate, 
-                    AudioFormat.CHANNEL_OUT_STEREO, 
-                    AudioFormat.ENCODING_PCM_16BIT);
-
             AudioTrack track = new AudioTrack.Builder()
                     .setAudioAttributes(attributes)
                     .setAudioFormat(format)
@@ -157,6 +292,8 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
             
             track.play();
             playerMap.put(ip, track);
+            emitSources(); // Notify UI about new source
+            
             sendEvent("onAudioActive", true);
             return track;
         } catch (Exception e) {
@@ -165,12 +302,16 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         }
     }
     
-    private void sendEvent(String eventName, boolean isActive) {
+    private void sendEvent(String eventName, Object data) {
         try {
             getReactApplicationContext()
                 .getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                .emit(eventName, isActive);
+                .emit(eventName, data);
         } catch (Exception e) {}
+    }
+
+    private void sendEvent(String eventName, boolean isActive) {
+        sendEvent(eventName, (Object)isActive);
     }
 
     @ReactMethod
@@ -198,6 +339,10 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
             if (socket != null) {
                 socket.close();
                 socket = null;
+            }
+            if (metaSocket != null) {
+                metaSocket.close();
+                metaSocket = null;
             }
         } catch (Exception e) {}
 
