@@ -462,7 +462,11 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                                 
                                 // v2.4.1: Add hidden system/BT latency
                                 int hiddenLatencyMs = getHiddenLatency(track);
-                                long totalLatencyMs = bufferLatencyMs + hiddenLatencyMs;
+                                
+                                // v2.4.2: Probe for vendor-specific Bluetooth parameters
+                                int probeLatencyMs = getA2DPLatency();
+                                
+                                long totalLatencyMs = bufferLatencyMs + hiddenLatencyMs + probeLatencyMs;
                                 
                                 WritableMap map = Arguments.createMap();
                                 map.putString("ip", ip);
@@ -483,6 +487,30 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         } catch (Exception e) {
             return 0;
         }
+    }
+
+    private int getA2DPLatency() {
+        try {
+            AudioManager am = (AudioManager) getReactApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+            // Probe common vendor keys
+            String params = am.getParameters("A2DP_latency;bt_headset_latency;audio_latency;bluetooth_latency");
+            if (params == null || params.isEmpty()) return 0;
+            
+            // Parse key=value; format
+            String[] pairs = params.split(";");
+            for (String pair : pairs) {
+                if (pair.contains("=")) {
+                    String[] kv = pair.split("=");
+                    if (kv.length == 2) {
+                        try {
+                            int val = Integer.parseInt(kv[1]);
+                            if (val > 0) return val;
+                        } catch (Exception e) {}
+                    }
+                }
+            }
+        } catch (Exception e) {}
+        return 0;
     }
 
     @ReactMethod
