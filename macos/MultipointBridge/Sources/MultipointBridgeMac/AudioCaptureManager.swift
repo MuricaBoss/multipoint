@@ -138,12 +138,16 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
                 let chunk = Array(audioAccumulator.prefix(samplesPerChunk))
                 audioAccumulator.removeFirst(samplesPerChunk)
                 
-                let data = Data(bytes: chunk, count: chunk.count * 2)
+                // Inject Timestamp (Diagnostic Header)
+                let timestamp = Int64(Date().timeIntervalSince1970 * 1000)
+                var packetData = Data()
+                withUnsafeBytes(of: timestamp.bigEndian) { packetData.append(contentsOf: $0) }
+                packetData.append(Data(bytes: chunk, count: chunk.count * 2))
                 
                 if var addr = targetAddress {
-                    let bytes = data.withUnsafeBytes { $0.baseAddress }
+                    let bytes = packetData.withUnsafeBytes { $0.baseAddress }
                     if let bytes = bytes {
-                        sendto(udpSocket, bytes, data.count, 0, 
+                        sendto(udpSocket, bytes, packetData.count, 0, 
                                withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
                                socklen_t(MemoryLayout<sockaddr_in>.size))
                     }

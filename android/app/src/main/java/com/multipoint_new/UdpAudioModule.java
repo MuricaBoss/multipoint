@@ -219,9 +219,23 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                         lastActivity.put(senderIp, System.currentTimeMillis());
 
                         AudioTrack track = getOrCreateTrack(senderIp, 48000);
-                        if (track != null && isRunning) {
-                            // SAFE MODE: Use standard blocking write for ultimate stability.
-                            track.write(buffer, 0, length);
+                        if (track != null && isRunning && length > 8) {
+                            // DIAGNOSTIC: Extract 8-byte timestamp (Big Endian)
+                            long remoteTime = 0;
+                            for (int i = 0; i < 8; i++) {
+                                remoteTime = (remoteTime << 8) | (buffer[i] & 0xFF);
+                            }
+                            long localTime = System.currentTimeMillis();
+                            long transitTime = localTime - remoteTime;
+                            
+                            // Log latency every 300 packets (~1.5 seconds)
+                            packetCount++;
+                            if (packetCount % 300 == 0) {
+                                Log.d(TAG, "⏱ Latency Diagnostic: Network Transit = " + transitTime + "ms");
+                            }
+
+                            // Skip the 8-byte timestamp header for audio playback
+                            track.write(buffer, 8, length - 8);
                         }
                     }
                 } catch (Exception e) {
