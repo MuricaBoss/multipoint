@@ -15,7 +15,9 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     // VAD settings
     private let silenceThreshold: Float = 0.0001 // More sensitive (-80dB)
     private var silenceCounter: Int = 0
-    private let silenceHangoverFrames: Int = 50 // Approx 500ms at 10ms chunks
+    private let silenceHangoverFrames: Int = 50 
+    private var audioAccumulator = [Int16]()
+    private let sendChunkSize = 256 // frames
 
     func setTarget(ip: String, port: Int) {
         if udpSocket >= 0 { close(udpSocket) }
@@ -127,14 +129,24 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
             
-            let data = Data(bytes: interleavedInt16, count: interleavedInt16.count * 2)
+            // Append new samples to accumulator
+            audioAccumulator.append(contentsOf: interleavedInt16)
             
-            if var addr = targetAddress {
-                let bytes = data.withUnsafeBytes { $0.baseAddress }
-                if let bytes = bytes {
-                    sendto(udpSocket, bytes, data.count, 0, 
-                           withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
-                           socklen_t(MemoryLayout<sockaddr_in>.size))
+            // Send in small 256-frame chunks (512 samples for stereo)
+            let samplesPerChunk = sendChunkSize * 2
+            while audioAccumulator.count >= samplesPerChunk {
+                let chunk = Array(audioAccumulator.prefix(samplesPerChunk))
+                audioAccumulator.removeFirst(samplesPerChunk)
+                
+                let data = Data(bytes: chunk, count: chunk.count * 2)
+                
+                if var addr = targetAddress {
+                    let bytes = data.withUnsafeBytes { $0.baseAddress }
+                    if let bytes = bytes {
+                        sendto(udpSocket, bytes, data.count, 0, 
+                               withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
+                               socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
                 }
             }
         }
