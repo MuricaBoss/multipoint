@@ -27,7 +27,7 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         let config = SCStreamConfiguration()
         config.capturesAudio = true
         config.sampleRate = 48000
-        config.channelCount = 1
+        config.channelCount = 2 // Stereo
         config.width = 100
         config.height = 100
         config.queueDepth = 10
@@ -45,47 +45,61 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     
     // SCStreamOutput Delegate
     @objc func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        // print("📈 Delegate poke: \(type == .audio ? "AUDIO" : "VIDEO")")
-        
         if type == .audio {
-            guard dataChannel.readyState == .open else { 
-                // print("⏳ DataChannel not open, skipping buffer")
-                return 
-            }
+            guard dataChannel.readyState == .open else { return }
             
-            guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { 
-                // print("📭 Empty audio buffer")
-                return 
-            }
+            var blockBuffer: CMBlockBuffer?
+            let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
+            guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription!)?.pointee else { return }
             
-            let length = CMBlockBufferGetDataLength(blockBuffer)
-            // print("📤 Sending \(length) bytes")
+            let channelCount = Int(asbd.mChannelsPerFrame)
+            let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
             
-            var data = Data(count: length)
-            data.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) in
-                if let baseAddress = buffer.baseAddress {
-                    CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: baseAddress)
+            // Allocate space for the buffer list based on channel count
+            let bufferListPtr = AudioBufferList.allocate(maximumBuffers: channelCount)
+            defer { free(bufferListPtr.unsafeMutablePointer) }
+            
+            CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sampleBuffer,
+                bufferListSizeNeededOut: nil,
+                bufferListOut: bufferListPtr.unsafeMutablePointer,
+                bufferListSize: AudioBufferList.sizeInBytes(maximumBuffers: channelCount),
+                blockBufferAllocator: nil,
+                blockBufferMemoryAllocator: nil,
+                flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+                blockBufferOut: &blockBuffer
+            )
+            
+            var interleavedInt16 = [Int16]()
+            interleavedInt16.reserveCapacity(frameCount * 2)
+            
+            if channelCount == 2 {
+                let ptrL = bufferListPtr[0].mData?.assumingMemoryBound(to: Float.self)
+                let ptrR = bufferListPtr[1].mData?.assumingMemoryBound(to: Float.self)
+                
+                if let l = ptrL, let r = ptrR {
+                    for i in 0..<frameCount {
+                        let sL = max(-1.0, min(1.0, l[i]))
+                        interleavedInt16.append(Int16(sL * 32767.0))
+                        let sR = max(-1.0, min(1.0, r[i]))
+                        interleavedInt16.append(Int16(sR * 32767.0))
+                    }
                 }
-            }
-            // Convert Float32 to Int16
-            let count = length / MemoryLayout<Float>.size
-            var int16Data = Data(count: count * MemoryLayout<Int16>.size)
-            
-            data.withUnsafeBytes { (floatPtr: UnsafeRawBufferPointer) in
-                let floats = floatPtr.bindMemory(to: Float.self)
-                int16Data.withUnsafeMutableBytes { (int16Ptr: UnsafeMutableRawBufferPointer) in
-                    let ints = int16Ptr.bindMemory(to: Int16.self)
-                    for i in 0..<count {
-                        // Clamp and convert
-                        let sample = floats[i]
-                        let clamped = max(-1.0, min(1.0, sample))
-                        ints[i] = Int16(clamped * 32767.0)
+            } else {
+                // Fallback to Mono if needed, but still output 2 channels for Android
+                let ptr = bufferListPtr[0].mData?.assumingMemoryBound(to: Float.self)
+                if let p = ptr {
+                    for i in 0..<frameCount {
+                        let sample = max(-1.0, min(1.0, p[i]))
+                        let val = Int16(sample * 32767.0)
+                        interleavedInt16.append(val)
+                        interleavedInt16.append(val)
                     }
                 }
             }
             
-            let base64String = int16Data.base64EncodedString()
-            // print("📤 Sending \(count) samples as Base64 (\(base64String.count) chars)")
+            let data = Data(bytes: interleavedInt16, count: interleavedInt16.count * 2)
+            let base64String = data.base64EncodedString()
             let buffer = RTCDataBuffer(data: base64String.data(using: .utf8)!, isBinary: false)
             dataChannel.sendData(buffer)
         }

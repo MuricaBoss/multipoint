@@ -33,11 +33,11 @@ public class PcmPlayerModule extends ReactContextBaseJavaModule {
         AudioFormat format = new AudioFormat.Builder()
                 .setSampleRate(sampleRate)
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                 .build();
 
         int bufferSize = AudioTrack.getMinBufferSize(sampleRate, 
-                AudioFormat.CHANNEL_OUT_MONO, 
+                AudioFormat.CHANNEL_OUT_STEREO, 
                 AudioFormat.ENCODING_PCM_16BIT);
         
         audioTrack = new AudioTrack(attributes,
