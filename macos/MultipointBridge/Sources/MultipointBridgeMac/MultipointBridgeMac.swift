@@ -112,10 +112,6 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = contentView
         
-        // --- DEVICE NAME SECTION ---
-        let nameLabel = NSTextField(labelWithString: "DEVICE NAME:")
-        nameLabel.frame = NSRect(x: 20, y: 170 + 130, width: 100, height: 20)
-        let titleLabel = NSTextField(labelWithString: "")
         // --- TITLE SECTION ---
         let titleLabel = NSTextField(labelWithString: "🔧 UNIFIED CALIBRATION (v3.3.0)")
         titleLabel.frame = NSRect(x: 20, y: 310, width: 310, height: 24)
@@ -138,7 +134,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         
         // Save Button
         let saveBtn = NSButton(title: "Save", target: self, action: #selector(saveNameFromWindow))
-        saveBtn.frame = NSRect(x: 255, y: 136 + 130, width: 80, height: 32)
+        saveBtn.frame = NSRect(x: 255, y: 136 + 100, width: 80, height: 32)
         contentView.addSubview(saveBtn)
         
         // --- CALIBRATION SECTION (v3.0.0) ---
