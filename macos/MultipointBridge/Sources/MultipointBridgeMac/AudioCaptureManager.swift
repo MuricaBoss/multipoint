@@ -190,20 +190,6 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         print("🔊 Audio Pulse (Slow) Sent to Android")
     }
 
-    func sendCommandPulse() {
-        // v3.3.0: Fast-Path Command (Pikareitti)
-        let msg = "CMD:BEEP"
-        if let data = msg.data(using: .utf8), var addr = targetAddress {
-            let bytes = data.withUnsafeBytes { $0.baseAddress }
-            if let bytes = bytes {
-                sendto(udpSocket, bytes, data.count, 0, 
-                       withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
-                       socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-            print("⚡️ Command Pulse (Fast) Sent to Android")
-        }
-    }
-
     private func sendPacket(pcmData: Data, timestamp: Int64) {
         var packetData = Data()
         withUnsafeBytes(of: timestamp.bigEndian) { packetData.append(contentsOf: $0) }

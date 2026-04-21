@@ -17,8 +17,8 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     private var nameHeartbeatTask: Task<Void, Never>?
     
     // v3.0.0 Calibration Mode
-    private var calibrationTimer: Timer?
-    private var isCalibrating = false
+    private var isCalibrationEnabled = false
+    private var calibrationThread: Thread? // v4.0.0: Atomic Sequencer
     private var syncOffsetMs: Double = 310.0
     private var localSinePlayer: AVAudioPlayerNode?
     private var audioEngine: AVAudioEngine?
@@ -106,7 +106,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
             defer: false
         )
         window.center()
-        window.title = "Multipoint Mixer: Transmitter (v3.3.0)"
+        window.title = "Multipoint Mixer: Transmitter (v4.0.0)"
         window.isReleasedWhenClosed = false
         
         let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
@@ -137,11 +137,11 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         saveBtn.frame = NSRect(x: 255, y: 136 + 100, width: 80, height: 32)
         contentView.addSubview(saveBtn)
         
-        // --- CALIBRATION SECTION (v3.0.0) ---
-        let calTitle = NSTextField(labelWithString: "🔧 CALIBRATION MODE")
-        calTitle.frame = NSRect(x: 20, y: 220, width: 200, height: 20)
+        // --- CALIBRATION SECTION (v4.0.0) ---
+        let calTitle = NSTextField(labelWithString: "🔧 ATOMIC CALIBRATION (v4.0.0)")
+        calTitle.frame = NSRect(x: 20, y: 220, width: 250, height: 20)
         calTitle.font = .systemFont(ofSize: 12, weight: .bold)
-        calTitle.textColor = .systemBlue
+        calTitle.textColor = .systemRed // High precision color!
         contentView.addSubview(calTitle)
         
         let calSwitch = NSButton(checkboxWithTitle: "Enable Calibration Ticks", target: self, action: #selector(toggleCalibration))
@@ -178,14 +178,54 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         window.makeKeyAndOrderFront(self)
     }
 
-    @objc func toggleCalibration() {
-        isCalibrating = !isCalibrating
-        captureManager.isMuted = isCalibrating // v3.1.2: Mute system audio during calibration
-        if isCalibrating {
-            startCalibrationLoop()
+    @objc func toggleCalibration(_ sender: NSButton) {
+        isCalibrationEnabled = (sender.state == .on)
+        captureManager.isMuted = isCalibrationEnabled
+        
+        if isCalibrationEnabled {
+            print("🚀 Atomic Sequencer Started (v4.0.0)")
+            setupAudioEngine()
+            startAtomicSequencer()
         } else {
-            stopCalibrationLoop()
+            print("🛑 Atomic Sequencer Stopped")
+            audioEngine?.stop()
         }
+    }
+
+    private func startAtomicSequencer() {
+        calibrationThread = Thread { [weak self] in
+            guard let self = self else { return }
+            
+            var timebaseInfo = mach_timebase_info()
+            mach_timebase_info(&timebaseInfo)
+            
+            let cycleLengthSeconds: Double = 1.5
+            let cycleLengthTicks = UInt64(cycleLengthSeconds * 1_000_000_000 * Double(timebaseInfo.denom) / Double(timebaseInfo.numer))
+            
+            while self.isCalibrationEnabled {
+                let startTicks = mach_absolute_time()
+                
+                // 1. Send Audio Pulse (Slow Path) to Android at T=0
+                self.captureManager.sendCalibrationPulse()
+                
+                // 2. Wait for Slider Delay
+                let offsetMs = self.syncOffsetMs
+                let delayTicks = UInt64(offsetMs * 1_000_000 * Double(timebaseInfo.denom) / Double(timebaseInfo.numer))
+                
+                mach_wait_until(startTicks + delayTicks)
+                
+                // 3. Play Local Pulse (Mac Speaker) at T=Slider
+                if self.isCalibrationEnabled {
+                    self.playLocalTick()
+                }
+                
+                // 4. Wait for next cycle
+                mach_wait_until(startTicks + cycleLengthTicks)
+            }
+        }
+        
+        calibrationThread?.qualityOfService = .userInteractive
+        calibrationThread?.start()
     }
 
     @objc func onSliderMove(_ sender: NSSlider) {
@@ -195,62 +235,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         }
     }
 
-    private func startCalibrationLoop() {
-        setupAudioEngine()
-        calibrationTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in // v3.2.0: Slower cycle for rhythm
-            self?.triggerCalibrationCycle()
-        }
-    }
-
-    private func stopCalibrationLoop() {
-        calibrationTimer?.invalidate()
-        calibrationTimer = nil
-        audioEngine?.stop()
-    }
-
     private func setupAudioEngine() {
-        if audioEngine != nil { return }
-        let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        
-        let format = engine.mainMixerNode.outputFormat(forBus: 0)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
-        
-        do {
-            try engine.start()
-            self.audioEngine = engine
-            self.localSinePlayer = player
-        } catch {
-            print("❌ Calibration Audio Engine failed")
-        }
-    }
-
-    private func triggerCalibrationCycle() {
-        // v3.2.0: Rhythm Pattern (Double-Tap)
-        // Pulse 1
-        performSinglePulse()
-        
-        // Pulse 2 after 200ms
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            self?.performSinglePulse()
-        }
-    }
-
-    private func performSinglePulse() {
-        // v3.3.0: Double-Beep Comparison (Headphones Only)
-        // 1. Send Audio Pulse (Slow Path) IMMEDIATELY
-        captureManager.sendCalibrationPulse()
-        
-        // 2. Send Command Pulse (Fast Path) DELAYED by Slider
-        let delaySeconds = syncOffsetMs / 1000.0
-        DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds) { [weak self] in
-            self?.captureManager.sendCommandPulse()
-        }
-        
-        // 3. Local Feedback (Optional, for Mac Speaker reference)
-        // playLocalTick() // v3.3.0: Disabled by default to focus on headphones
-    }
 
     private func playLocalTick() {
         guard let player = localSinePlayer, let engine = audioEngine, engine.isRunning else { return }

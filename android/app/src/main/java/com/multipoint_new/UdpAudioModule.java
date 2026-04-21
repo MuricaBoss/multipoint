@@ -43,7 +43,6 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
     private DatagramSocket socket;
     private DatagramSocket metaSocket;
     private boolean isRunning = false;
-    private AudioTrack commandTrack; // v3.3.0: Fast-path local beep
     private int port = 9999;
     private int metaPort = 9998;
     private Timer cleanupTimer;
@@ -202,7 +201,6 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         
         registerService(9999);
         startCleanupTimer();
-        initCommandTrack(); // v3.3.0: Pre-load the fast-path pulse
 
         // 1. Audio Data Thread (Port 9999)
         new Thread(new Runnable() {
@@ -229,17 +227,6 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                         // v3.2.1: Detect Calibration Pulse (Mac sends 10ms/480 frames = 1920 bytes + 8 header = 1928)
                         if (length == 1928) {
                             sendEvent("onPulse", null);
-                        }
-
-                        // v3.3.0: Detect Command Pulse (Fast-Path Local Beep)
-                        if (length >= 8 && new String(buffer, 0, 8, StandardCharsets.UTF_8).startsWith("CMD:BEEP")) {
-                            if (commandTrack != null) {
-                                commandTrack.stop();
-                                commandTrack.setNotificationMarkerPosition(0);
-                                commandTrack.reloadStaticData();
-                                commandTrack.play();
-                            }
-                            continue;
                         }
 
                         AudioTrack track = getOrCreateTrack(senderIp, 48000);
@@ -405,44 +392,6 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         }
     }
     
-    private void initCommandTrack() {
-        try {
-            int sampleRate = 48000;
-            int frameCount = 480; // 10ms
-            short[] samples = new short[frameCount * 2];
-            for (int i = 0; i < frameCount; i++) {
-                short val = (short) (Math.sin(2.0 * Math.PI * i * 1000.0 / sampleRate) * 16000.0);
-                samples[i * 2] = val;
-                samples[i * 2 + 1] = val;
-            }
-
-            AudioAttributes attributes = new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
-                    .build();
-
-            AudioFormat format = new AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                    .build();
-
-            commandTrack = new AudioTrack.Builder()
-                    .setAudioAttributes(attributes)
-                    .setAudioFormat(format)
-                    .setBufferSizeInBytes(samples.length * 2)
-                    .setTransferMode(AudioTrack.MODE_STATIC)
-                    .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-                    .build();
-
-            commandTrack.write(samples, 0, samples.length);
-            Log.d(TAG, "🚀 Command Track Initialized (v3.3.0)");
-        } catch (Exception e) {
-            Log.e(TAG, "❌ Failed to init command track: " + e.getMessage());
-        }
-    }
-
     private void sendEvent(String eventName, Object data) {
         try {
             getReactApplicationContext()
