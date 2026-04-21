@@ -17,6 +17,11 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     
     private var udpSocket: Int32 = -1
     private var targetAddress: sockaddr_in?
+    
+    // VAD settings
+    private let silenceThreshold: Float = 0.0001 // More sensitive (-80dB)
+    private var silenceCounter: Int = 0
+    private let silenceHangoverFrames: Int = 50 // Approx 500ms at 10ms chunks
 
     func setTargetIP(_ ip: String) {
         udpSocket = socket(AF_INET, SOCK_DGRAM, 0)
@@ -44,8 +49,8 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         config.capturesAudio = true
         config.sampleRate = 48000
         config.channelCount = 2 // Stereo
-        config.width = 100
-        config.height = 100
+        config.width = 2 // Minimal video
+        config.height = 2
         config.queueDepth = 5 // Balanced latency
         
         stream = SCStream(filter: filter, configuration: config, delegate: self)
@@ -90,6 +95,7 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
             
             var interleavedInt16 = [Int16]()
             interleavedInt16.reserveCapacity(frameCount * 2)
+            var maxAmp: Float = 0
             
             if channelCount == 2 {
                 let ptrL = bufferListPtr[0].mData?.assumingMemoryBound(to: Float.self)
@@ -97,23 +103,36 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
                 
                 if let l = ptrL, let r = ptrR {
                     for i in 0..<frameCount {
-                        let sL = max(-1.0, min(1.0, l[i]))
-                        interleavedInt16.append(Int16(sL * 32767.0))
-                        let sR = max(-1.0, min(1.0, r[i]))
-                        interleavedInt16.append(Int16(sR * 32767.0))
+                        let sL = l[i]
+                        let sR = r[i]
+                        maxAmp = max(maxAmp, abs(sL), abs(sR))
+                        
+                        interleavedInt16.append(Int16(max(-1.0, min(1.0, sL)) * 32767.0))
+                        interleavedInt16.append(Int16(max(-1.0, min(1.0, sR)) * 32767.0))
                     }
                 }
             } else {
-                // Fallback to Mono if needed, but still output 2 channels for Android
                 let ptr = bufferListPtr[0].mData?.assumingMemoryBound(to: Float.self)
                 if let p = ptr {
                     for i in 0..<frameCount {
-                        let sample = max(-1.0, min(1.0, p[i]))
-                        let val = Int16(sample * 32767.0)
+                        let sample = p[i]
+                        maxAmp = max(maxAmp, abs(sample))
+                        let val = Int16(max(-1.0, min(1.0, sample)) * 32767.0)
                         interleavedInt16.append(val)
                         interleavedInt16.append(val)
                     }
                 }
+            }
+            
+            // Silence Suppression
+            if maxAmp < silenceThreshold {
+                silenceCounter += 1
+            } else {
+                silenceCounter = 0
+            }
+            
+            if silenceCounter > silenceHangoverFrames {
+                return
             }
             
             let data = Data(bytes: interleavedInt16, count: interleavedInt16.count * 2)

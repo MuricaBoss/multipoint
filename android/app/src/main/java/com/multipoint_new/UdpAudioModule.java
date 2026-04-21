@@ -10,9 +10,11 @@ import com.facebook.react.bridge.ReactMethod;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.util.HashMap;
+import java.util.Map;
 
 public class UdpAudioModule extends ReactContextBaseJavaModule {
-    private AudioTrack audioTrack;
+    private Map<String, AudioTrack> playerMap = new HashMap<>();
     private DatagramSocket socket;
     private boolean isRunning = false;
     private int port = 9999;
@@ -37,52 +39,24 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
             public void run() {
                 try {
                     socket = new DatagramSocket(9999);
-                    socket.setReceiveBufferSize(256 * 1024);
+                    socket.setReceiveBufferSize(512 * 1024);
                     
                     final int sampleRate = 48000;
-                    
-                    AudioAttributes attributes = new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                            .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
-                            .build();
-
-                    AudioFormat format = new AudioFormat.Builder()
-                            .setSampleRate(sampleRate)
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                            .build();
-
-                    int minBufferSize = AudioTrack.getMinBufferSize(sampleRate, 
-                            AudioFormat.CHANNEL_OUT_STEREO, 
-                            AudioFormat.ENCODING_PCM_16BIT);
-
-                    audioTrack = new AudioTrack.Builder()
-                            .setAudioAttributes(attributes)
-                            .setAudioFormat(format)
-                            .setBufferSizeInBytes(minBufferSize)
-                            .setTransferMode(AudioTrack.MODE_STREAM)
-                            .build();
-                    
-                    audioTrack.play();
-
                     byte[] pktBuffer = new byte[8192];
+                    
                     while (isRunning) {
                         DatagramPacket packet = new DatagramPacket(pktBuffer, pktBuffer.length);
                         socket.receive(packet);
                         
-                        if (audioTrack != null) {
-                            // DRIFT PROTECTION:
-                            // Try to write to the buffer. If it's full, write() will return 0 or less than length.
-                            // We use WRITE_NON_BLOCKING to ensure we never wait (which would grow the delay).
-                            int written = audioTrack.write(packet.getData(), 0, packet.getLength(), AudioTrack.WRITE_NON_BLOCKING);
-                            
-                            // If we couldn't write the full packet, it means the buffer is full.
-                            // We don't retry - we just drop it to stay at the head of the stream.
+                        String senderIp = packet.getAddress().getHostAddress();
+                        AudioTrack track = getOrCreateTrack(senderIp, sampleRate);
+                        
+                        if (track != null && isRunning) {
+                            track.write(packet.getData(), 0, packet.getLength());
                         }
                     }
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    if (isRunning) e.printStackTrace();
                 } finally {
                     stopServerInternal();
                 }
@@ -90,21 +64,79 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         }).start();
     }
 
+    private synchronized AudioTrack getOrCreateTrack(String ip, int sampleRate) {
+        if (playerMap.containsKey(ip)) {
+            return playerMap.get(ip);
+        }
+
+        try {
+            AudioAttributes attributes = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
+                    .build();
+
+            AudioFormat format = new AudioFormat.Builder()
+                    .setSampleRate(sampleRate)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                    .build();
+
+            int minBufferSize = AudioTrack.getMinBufferSize(sampleRate, 
+                    AudioFormat.CHANNEL_OUT_STEREO, 
+                    AudioFormat.ENCODING_PCM_16BIT);
+
+            AudioTrack track = new AudioTrack.Builder()
+                    .setAudioAttributes(attributes)
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(minBufferSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build();
+            
+            track.play();
+            playerMap.put(ip, track);
+            sendEvent("onAudioActive", true);
+            return track;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+    
+    private void sendEvent(String eventName, boolean isActive) {
+        try {
+            getReactApplicationContext()
+                .getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                .emit(eventName, isActive);
+        } catch (Exception e) {}
+    }
+
     @ReactMethod
     public void stopServer() {
         isRunning = false;
-        stopServerInternal();
-    }
-
-    private void stopServerInternal() {
         if (socket != null) {
             socket.close();
-            socket = null;
         }
-        if (audioTrack != null) {
-            audioTrack.stop();
-            audioTrack.release();
-            audioTrack = null;
+    }
+
+    private synchronized void stopServerInternal() {
+        isRunning = false;
+        try {
+            if (socket != null) {
+                socket.close();
+                socket = null;
+            }
+        } catch (Exception e) {}
+
+        for (AudioTrack track : playerMap.values()) {
+            try {
+                track.pause();
+                track.flush();
+                track.release();
+            } catch (Exception e) {}
         }
+        playerMap.clear();
+        
+        sendEvent("onAudioActive", false);
     }
 }

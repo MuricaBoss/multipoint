@@ -7,25 +7,34 @@ import {
   useColorScheme,
   View,
   TouchableOpacity,
+  NativeModules,
+  NativeEventEmitter,
 } from 'react-native';
 import {NetworkInfo} from 'react-native-network-info';
 import { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, MediaStream } from 'react-native-webrtc';
 import { createPeerConnection } from './src/utils/webrtc';
 import { SignalingServer, SignalingDelegate } from './src/native/SignalingServer';
 
+const { UdpAudio, PcmPlayer } = NativeModules;
+const udpEventEmitter = new NativeEventEmitter(UdpAudio);
+
 function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
   const [ipAddress, setIpAddress] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('Ready');
   const [isConnected, setIsConnected] = useState(false);
-  
   const [isUdpActive, setIsUdpActive] = useState(false);
+  const [isAudioLive, setIsAudioLive] = useState(false);
   
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const signalingServerRef = useRef<SignalingServer | null>(null);
 
-  const { NativeModules } = require('react-native');
-  const { UdpAudio } = NativeModules;
+  useEffect(() => {
+    const sub = udpEventEmitter.addListener('onAudioActive', (isActive) => {
+      setIsAudioLive(isActive);
+    });
+    return () => sub.remove();
+  }, []);
 
   const cleanup = useCallback(() => {
     if (pcRef.current) {
@@ -39,6 +48,7 @@ function App(): React.JSX.Element {
     UdpAudio.stopServer();
     setIsUdpActive(false);
     setIsConnected(false);
+    setIsAudioLive(false);
     setStatus('Ready');
   }, []);
 
@@ -49,6 +59,7 @@ function App(): React.JSX.Element {
       cleanup();
       UdpAudio.startServer();
       setIsUdpActive(true);
+      setStatus('UDP Receiving');
     }
   };
 
@@ -71,13 +82,9 @@ function App(): React.JSX.Element {
         const channel = event.channel;
         if (channel.label === 'audio-stream') {
           console.log('Audio Data Channel opened!');
-          const { NativeModules } = require('react-native');
-          const { PcmPlayer } = NativeModules;
-          
           PcmPlayer.start();
           
           channel.onmessage = (msg: any) => {
-            // msg.data is base64 from current react-native-webrtc versions for binary
             PcmPlayer.play(msg.data);
           };
           
@@ -155,29 +162,36 @@ function App(): React.JSX.Element {
           <Text style={styles.status}>Status: {status}</Text>
         </View>
 
-        <TouchableOpacity 
-          style={[styles.button, status !== 'Ready' && styles.buttonActive]} 
-          onPress={toggleConnection}
-        >
-          <Text style={styles.buttonText}>
-            {status === 'Ready' ? 'Start WebRTC' : 'Stop WebRTC'}
-          </Text>
-        </TouchableOpacity>
+        {isUdpActive && (
+          <View style={[styles.activityRow, { marginBottom: 20 }]}>
+            <View style={[styles.dot, isAudioLive && { backgroundColor: '#4caf50', shadowColor: '#4caf50', shadowRadius: 10, elevation: 5 }]} />
+            <Text style={[styles.status, { color: isAudioLive ? '#4caf50' : '#757575' }]}>
+              {isAudioLive ? 'Audio Signal: Active' : 'Audio Signal: Idling'}
+            </Text>
+          </View>
+        )}
 
-        <View style={{height: 20}} />
+        {isUdpActive && (
+          <View style={[styles.activityRow, { marginBottom: 20 }]}>
+            <View style={[styles.dot, isAudioLive && { backgroundColor: '#4caf50', shadowColor: '#4caf50', shadowRadius: 10, elevation: 5 }]} />
+            <Text style={[styles.status, { color: isAudioLive ? '#4caf50' : '#757575' }]}>
+              {isAudioLive ? 'Audio Signal: Active' : 'Audio Signal: Idling'}
+            </Text>
+          </View>
+        )}
 
         <TouchableOpacity 
           style={[styles.button, isUdpActive && {backgroundColor: '#ff9500'}]} 
           onPress={toggleUdp}
         >
           <Text style={styles.buttonText}>
-            {isUdpActive ? 'Stop UDP Server' : 'Start UDP Mode'}
+            {isUdpActive ? 'Stop Service' : 'Start Multipoint Audio'}
           </Text>
         </TouchableOpacity>
         
-        {(isConnected || isUdpActive) && (
+        {isUdpActive && (
             <Text style={styles.hint}>
-              {isUdpActive ? 'UDP Server listening on port 9999' : 'Streaming from Mac via WebRTC...'}
+              Listening for audio from Mac/Windows on port 9999
             </Text>
         )}
       </View>
@@ -236,6 +250,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 48,
+  },
+  activityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
   },
   dot: {
     width: 10,
