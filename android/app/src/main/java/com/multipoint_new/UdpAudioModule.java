@@ -376,6 +376,7 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
             
             track.play();
             playerMap.put(ip, track);
+            totalFramesWritten.put(ip, 0L); // v2.4.3: Reset counter for fresh sync
             emitSources(); // Notify UI about new source
             
             sendEvent("onAudioActive", true);
@@ -504,7 +505,15 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     if (kv.length == 2) {
                         try {
                             int val = Integer.parseInt(kv[1]);
-                            if (val > 0) return val;
+                            if (val > 0) {
+                                // v2.4.3: Unit normalization
+                                // If val is > 1000, it's likely microseconds (us)
+                                if (val > 1000) val /= 1000;
+                                // Many HALs report in high numbers, if it's still > 1000, it's likely samples
+                                if (val > 1000) val /= 48; 
+                                
+                                return val;
+                            }
                         } catch (Exception e) {}
                     }
                 }
