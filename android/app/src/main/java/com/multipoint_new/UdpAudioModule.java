@@ -277,16 +277,22 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
                     .build();
 
-            // ROCK SOLID: Standardize to 48000Hz (Mac Native) 
-            int finalizedSampleRate = 48000;
+            // DEEP LATENCY: RESTORE NATIVE HARDWARE ALIGNMENT
+            int nativeSampleRate = 48000;
+            try {
+                android.media.AudioManager am = (android.media.AudioManager) getReactApplicationContext().getSystemService(android.content.Context.AUDIO_SERVICE);
+                String rate = am.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE);
+                if (rate != null) nativeSampleRate = Integer.parseInt(rate);
+                Log.d(TAG, "📱 Native Hardware Sample Rate: " + nativeSampleRate + " Hz");
+            } catch (Exception e) {}
 
             AudioFormat format = new AudioFormat.Builder()
-                    .setSampleRate(finalizedSampleRate)
+                    .setSampleRate(nativeSampleRate)
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                     .build();
 
-            int minBufferSize = AudioTrack.getMinBufferSize(finalizedSampleRate, 
+            int minBufferSize = AudioTrack.getMinBufferSize(nativeSampleRate, 
                     AudioFormat.CHANNEL_OUT_STEREO, 
                     AudioFormat.ENCODING_PCM_16BIT);
 
@@ -298,12 +304,12 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                     .build();
             
-            // SAFE MODE: Use 4096 frames (~85ms) for total stability. 
-            // This is the baseline we need to cross to get clean audio.
+            // DEEP LATENCY: Use 480 frames (~10ms) for ultimate speed.
+            // This requires high-frequency packets from Mac to avoid starvation.
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                int targetFrames = 4096; 
+                int targetFrames = 480; 
                 int actualFrames = track.setBufferSizeInFrames(targetFrames);
-                Log.d(TAG, "✅ Safe Mode Tuned: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
+                Log.d(TAG, "⚡️ Deep Latency Tuned: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
             }
             
             track.play();
