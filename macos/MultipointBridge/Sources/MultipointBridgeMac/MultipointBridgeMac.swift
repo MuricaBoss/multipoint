@@ -110,7 +110,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
             defer: false
         )
         window.center()
-        window.title = "Multipoint Mixer (v5.0.0 - SONAR)"
+        window.title = "Multipoint Mixer (v5.0.1 - SONAR+)"
         window.isReleasedWhenClosed = false
         
         let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
@@ -178,6 +178,19 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         sonarStatus.alignment = .center
         sonarStatus.tag = 700
         contentView.addSubview(sonarStatus)
+        
+        // --- MIC LEVEL METER (v5.0.1) ---
+        let levelLabel = NSTextField(labelWithString: "Mic Input Level:")
+        levelLabel.frame = NSRect(x: 20, y: 115, width: 100, height: 15)
+        levelLabel.font = .systemFont(ofSize: 9)
+        contentView.addSubview(levelLabel)
+        
+        let levelBar = NSProgressIndicator(frame: NSRect(x: 120, y: 116, width: 210, height: 12))
+        levelBar.isIndeterminate = false
+        levelBar.minValue = 0
+        levelBar.maxValue = 1
+        levelBar.tag = 701
+        contentView.addSubview(levelBar)
         
         // --- STATUS SECTION ---
         let statusTitle = NSTextField(labelWithString: "STATUS:")
@@ -279,10 +292,10 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         // 48000 samples per second
         let timeOffsetMs = Double(maxIndex) / 48.0
         
-        // Minimum threshold check to avoid picking up floor noise
-        if maxVal < 0.1 {
-            status.stringValue = "Error: Pulse too quiet! 🔊⬆️"
-            status.textColor = .systemRed
+        // v5.0.1: Lowered threshold (0.05)
+        if maxVal < 0.05 {
+            status.stringValue = "Still too quiet! 🔊⬆️ Find the mic hole!"
+            status.textColor = .systemOrange
         } else {
             print("🎯 Sonar detected peak at \(Int(timeOffsetMs))ms with magnitude \(maxVal)")
             
@@ -357,12 +370,26 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
             let inputNode = engine.inputNode
             let inputFormat = inputNode.inputFormat(forBus: 0)
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-                guard let self = self, self.isRecordingSonar else { return }
+                guard let self = self else { return }
+                
+                // Update Mic Level (v5.0.1)
                 if let channelData = buffer.floatChannelData {
                     let frameCount = Int(buffer.frameLength)
-                    let data = channelData[0]
+                    var peak: Float = 0
                     for i in 0..<frameCount {
-                        self.sonarBuffer.append(data[i])
+                        peak = max(peak, abs(channelData[0][i]))
+                    }
+                    DispatchQueue.main.async {
+                        if let bar = self.mainWindow?.contentView?.viewWithTag(701) as? NSProgressIndicator {
+                            bar.doubleValue = Double(peak)
+                        }
+                    }
+                    
+                    if self.isRecordingSonar {
+                        let data = channelData[0]
+                        for i in 0..<frameCount {
+                            self.sonarBuffer.append(data[i])
+                        }
                     }
                 }
             }

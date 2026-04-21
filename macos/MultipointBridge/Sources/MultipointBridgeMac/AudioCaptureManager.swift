@@ -178,8 +178,8 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         samples.reserveCapacity(frameCount * 2)
         
         for i in 0..<frameCount {
-            // v3.1.3/v3.3.0: Remote Audio Pulse = 600Hz (Low Pop)
-            let val = (i % 80 < 40) ? Int16(12000) : Int16(-12000)
+            // v5.0.1: Boosted Amplitude (30000) for better Mic detection
+            let val = (i % 80 < 40) ? Int16(30000) : Int16(-30000)
             samples.append(val)
             samples.append(val)
         }
