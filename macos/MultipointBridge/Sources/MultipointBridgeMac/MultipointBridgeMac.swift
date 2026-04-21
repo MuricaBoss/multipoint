@@ -26,6 +26,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     private var sonarBuffer = [Float]() // v5.0.0: Recording buffer
     private var isRecordingSonar = false
     private var sonarStartTime: Date?
+    private weak var levelBar: NSProgressIndicator? // v5.0.1: Direct reference
     private var calibrationUIElements = [NSView]()
 
     static func main() {
@@ -189,8 +190,8 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         levelBar.isIndeterminate = false
         levelBar.minValue = 0
         levelBar.maxValue = 1
-        levelBar.tag = 701
         contentView.addSubview(levelBar)
+        self.levelBar = levelBar
         
         // --- STATUS SECTION ---
         let statusTitle = NSTextField(labelWithString: "STATUS:")
@@ -380,9 +381,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
                         peak = max(peak, abs(channelData[0][i]))
                     }
                     DispatchQueue.main.async {
-                        if let bar = self.mainWindow?.contentView?.viewWithTag(701) as? NSProgressIndicator {
-                            bar.doubleValue = Double(peak)
-                        }
+                        self.levelBar?.doubleValue = Double(peak)
                     }
                     
                     if self.isRecordingSonar {
