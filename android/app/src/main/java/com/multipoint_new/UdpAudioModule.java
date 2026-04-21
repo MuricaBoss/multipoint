@@ -283,8 +283,17 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
                     .build();
 
+            // NATIVE OPTIMIZATION: Query hardware-native sample rate and buffer size
+            int nativeSampleRate = 48000;
+            try {
+                android.media.AudioManager am = (android.media.AudioManager) getReactApplicationContext().getSystemService(Context.AUDIO_SERVICE);
+                String rate = am.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE);
+                if (rate != null) nativeSampleRate = Integer.parseInt(rate);
+                Log.d(TAG, "📱 Native Hardware Sample Rate: " + nativeSampleRate + " Hz");
+            } catch (Exception e) {}
+
             AudioFormat format = new AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
+                    .setSampleRate(nativeSampleRate)
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                     .build();
@@ -297,12 +306,12 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                     .build();
             
-            // DEEP LATENCY OPTIMIZATION: Shrink the active buffer size beyond the 'minimum' recommendation.
-            // 720 frames at 48kHz is exactly 15ms. This represents the best stable-low-latency target.
+            // STABILITY FIX: Use 1024 frames as the stable low-latency target. 
+            // 15ms (720 frames) was too aggressive for the environment. 1024 is approx 21ms.
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                int targetFrames = 720; 
+                int targetFrames = 1024; 
                 int actualFrames = track.setBufferSizeInFrames(targetFrames);
-                Log.d(TAG, "⚡️ Latency Stabilization: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
+                Log.d(TAG, "✅ Stability Tuned: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
             }
             
             track.play();
