@@ -77,6 +77,7 @@ function App(): React.JSX.Element {
   const [isAudioLive, setIsAudioLive] = useState(false);
   const [sources, setSources] = useState<{ip: string, name: string}[]>([]);
   const [sourceVolumes, setSourceVolumes] = useState<{[key: string]: number}>({});
+  const [hardwareLatency, setHardwareLatency] = useState<number>(0);
   
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const signalingServerRef = useRef<SignalingServer | null>(null);
@@ -99,9 +100,14 @@ function App(): React.JSX.Element {
       });
     });
 
+    const subLatency = udpEventEmitter.addListener('onLatencyUpdate', (event: {latencyMs: number}) => {
+      setHardwareLatency(event.latencyMs);
+    });
+
     return () => {
       subActive.remove();
       subSources.remove();
+      subLatency.remove();
     };
   }, []);
 
@@ -139,6 +145,7 @@ function App(): React.JSX.Element {
       try {
         const ip = await UdpAudio.getIPAddress();
         setIpAddress(ip);
+        UdpAudio.startLatencyReporter();
       } catch (e) {
         console.log('Native IP fetch failed, using fallback');
       }
@@ -237,7 +244,21 @@ function App(): React.JSX.Element {
       >
         <View style={styles.content}>
           <Text style={styles.title}>🎧 Multipoint Mixer</Text>
-          <Text style={styles.versionLabel}>v2.3.0</Text>
+          <Text style={styles.versionLabel}>v2.4.0</Text>
+
+          {isUdpActive && (
+            <View style={[styles.latencyMeter, { borderColor: hardwareLatency > 150 ? '#ff4444' : hardwareLatency > 50 ? '#ffbb33' : '#00ffaa' }]}>
+              <Text style={styles.latencyLabel}>LOCAL HARDWARE DELAY</Text>
+              <Text style={[styles.latencyValue, { color: hardwareLatency > 150 ? '#ff4444' : hardwareLatency > 50 ? '#ffbb33' : '#00ffaa' }]}>
+                {Math.round(hardwareLatency)} ms
+              </Text>
+              <Text style={styles.latencySubtext}>
+                {hardwareLatency > 150 ? '⚠️ Bluetooth/Buffer Lag' : 
+                 hardwareLatency > 50 ? '💡 Moderate Delay' : 
+                 '⚡ Extreme Low Latency'}
+              </Text>
+            </View>
+          )}
 
           <View style={styles.card}>
             <Text style={styles.label}>Your IP Address</Text>
@@ -502,6 +523,32 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingVertical: 40,
     fontSize: 15,
+  },
+  latencyMeter: {
+    padding: 16,
+    backgroundColor: '#161616',
+    borderRadius: 20,
+    marginBottom: 32,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  latencyLabel: {
+    color: '#666',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  latencyValue: {
+    fontSize: 32,
+    fontWeight: '900',
+  },
+  latencySubtext: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    marginTop: 4,
+    opacity: 0.6,
   },
 });
 

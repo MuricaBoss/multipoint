@@ -36,6 +36,7 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
     private int packetCount = 0;
     private long clockOffset = 0;
     private long rtt = 0;
+    private Map<String, Long> totalFramesWritten = new HashMap<>(); // v2.4.0 Truth Meter
     private Map<String, String> deviceNames = new HashMap<>();
     private Map<String, Long> lastActivity = new HashMap<>();
     private DatagramSocket socket;
@@ -256,6 +257,11 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                             }
 
                             track.write(buffer, 8, length - 8);
+                            
+                            // v2.4.0: Track total frames written (length - 8 bytes = (length-8)/4 frames for stereo Int16)
+                            long framesInThisPacket = (length - 8) / 4;
+                            Long currentTotal = totalFramesWritten.get(senderIp);
+                            totalFramesWritten.put(senderIp, (currentTotal == null ? 0 : currentTotal) + framesInThisPacket);
                         }
                     }
                 } catch (Exception e) {
@@ -433,6 +439,36 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         playerMap.clear();
         
         sendEvent("onAudioActive", false);
+    }
+
+    @ReactMethod
+    public void startLatencyReporter() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (isRunning) {
+                    try {
+                        Thread.sleep(500);
+                        for (Map.Entry<String, AudioTrack> entry : playerMap.entrySet()) {
+                            String ip = entry.getKey();
+                            AudioTrack track = entry.getValue();
+                            Long written = totalFramesWritten.get(ip);
+                            if (written != null && track != null) {
+                                // getPlaybackHeadPosition() is 32-bit uint in HAL, but int in Java
+                                long played = (long) track.getPlaybackHeadPosition() & 0xFFFFFFFFL;
+                                long diff = written - played;
+                                long latencyMs = (diff * 1000) / 48000;
+                                
+                                WritableMap map = Arguments.createMap();
+                                map.putString("ip", ip);
+                                map.putDouble("latencyMs", (double) latencyMs);
+                                sendEvent("onLatencyUpdate", map);
+                            }
+                        }
+                    } catch (Exception e) {}
+                }
+            }
+        }).start();
     }
 
     @ReactMethod
