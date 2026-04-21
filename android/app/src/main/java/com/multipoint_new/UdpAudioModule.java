@@ -458,11 +458,15 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                                 // getPlaybackHeadPosition() is 32-bit uint in HAL, but int in Java
                                 long played = (long) track.getPlaybackHeadPosition() & 0xFFFFFFFFL;
                                 long diff = written - played;
-                                long latencyMs = (diff * 1000) / 48000;
+                                long bufferLatencyMs = (diff * 1000) / 48000;
+                                
+                                // v2.4.1: Add hidden system/BT latency
+                                int hiddenLatencyMs = getHiddenLatency(track);
+                                long totalLatencyMs = bufferLatencyMs + hiddenLatencyMs;
                                 
                                 WritableMap map = Arguments.createMap();
                                 map.putString("ip", ip);
-                                map.putDouble("latencyMs", (double) latencyMs);
+                                map.putDouble("latencyMs", (double) totalLatencyMs);
                                 sendEvent("onLatencyUpdate", map);
                             }
                         }
@@ -470,6 +474,15 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                 }
             }
         }).start();
+    }
+
+    private int getHiddenLatency(AudioTrack track) {
+        try {
+            java.lang.reflect.Method method = AudioTrack.class.getMethod("getLatency");
+            return (int) method.invoke(track);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     @ReactMethod
