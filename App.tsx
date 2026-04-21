@@ -244,11 +244,11 @@ function App(): React.JSX.Element {
       >
         <View style={styles.content}>
           <Text style={styles.title}>🎧 Multipoint Mixer</Text>
-          <Text style={styles.versionLabel}>v4.0.0</Text>
+          <Text style={styles.versionLabel}>v5.0.0</Text>
 
           {isUdpActive && (
             <View style={[styles.latencyMeter, { borderColor: latencyInfo.total > 150 ? '#ff4444' : latencyInfo.total > 50 ? '#ffbb33' : '#00ffaa' }]}>
-              <Text style={styles.latencyLabel}>TOTAL SYNC OFFSET (v4.0.0)</Text>
+              <Text style={styles.latencyLabel}>TOTAL SYNC OFFSET (v5.0.0)</Text>
               <Text style={[styles.latencyValue, { color: latencyInfo.total > 150 ? '#ff4444' : latencyInfo.total > 50 ? '#ffbb33' : '#00ffaa' }]}>
                 {latencyInfo.total} ms
               </Text>

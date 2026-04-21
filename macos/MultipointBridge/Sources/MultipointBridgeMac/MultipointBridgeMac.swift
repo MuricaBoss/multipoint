@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ScreenCaptureKit
+import AVFoundation
 
 @main
 class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDelegate, NetServiceDelegate {
@@ -22,6 +23,9 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     private var syncOffsetMs: Double = 310.0
     private var localSinePlayer: AVAudioPlayerNode?
     private var audioEngine: AVAudioEngine?
+    private var sonarBuffer = [Float]() // v5.0.0: Recording buffer
+    private var isRecordingSonar = false
+    private var sonarStartTime: Date?
     private var calibrationUIElements = [NSView]()
 
     static func main() {
@@ -100,62 +104,80 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
 
     func createMainWindow() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 350),
+            contentRect: NSRect(x: 0, y: 0, width: 350, height: 450),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.center()
-        window.title = "Multipoint Mixer: Transmitter (v4.0.0)"
+        window.title = "Multipoint Mixer (v5.0.0 - SONAR)"
         window.isReleasedWhenClosed = false
         
         let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = contentView
         
         // --- TITLE SECTION ---
-        let titleLabel = NSTextField(labelWithString: "🔧 UNIFIED CALIBRATION (v3.3.0)")
-        titleLabel.frame = NSRect(x: 20, y: 310, width: 310, height: 24)
-        titleLabel.font = .systemFont(ofSize: 16, weight: .bold)
-        titleLabel.alignment = .center
-        contentView.addSubview(titleLabel)
+        let mainTitle = NSTextField(labelWithString: "🎧 MULTIPOINT MIXER (v5.0.0)")
+        mainTitle.frame = NSRect(x: 20, y: 410, width: 310, height: 24)
+        mainTitle.font = .systemFont(ofSize: 18, weight: .bold)
+        mainTitle.alignment = .center
+        contentView.addSubview(mainTitle)
 
         // --- DEVICE NAME SECTION ---
         let nameLabel = NSTextField(labelWithString: "DEVICE NAME:")
-        nameLabel.frame = NSRect(x: 20, y: 170 + 100, width: 100, height: 20)
+        nameLabel.frame = NSRect(x: 20, y: 370, width: 100, height: 20)
         nameLabel.font = .systemFont(ofSize: 11, weight: .bold)
         contentView.addSubview(nameLabel)
         
-        // Name Input field
-        let field = NSTextField(frame: NSRect(x: 20, y: 140 + 100, width: 230, height: 24))
+        let field = NSTextField(frame: NSRect(x: 20, y: 345, width: 230, height: 24))
         field.stringValue = customDeviceName
         field.font = .systemFont(ofSize: 14)
         contentView.addSubview(field)
         self.nameField = field
         
-        // Save Button
         let saveBtn = NSButton(title: "Save", target: self, action: #selector(saveNameFromWindow))
-        saveBtn.frame = NSRect(x: 255, y: 136 + 100, width: 80, height: 32)
+        saveBtn.frame = NSRect(x: 255, y: 341, width: 80, height: 32)
         contentView.addSubview(saveBtn)
         
-        // --- CALIBRATION SECTION (v4.0.0) ---
-        let calTitle = NSTextField(labelWithString: "🔧 ATOMIC CALIBRATION (v4.0.0)")
-        calTitle.frame = NSRect(x: 20, y: 220, width: 250, height: 20)
+        // --- CALIBRATION SECTION (v4.0.0 / v5.0.0) ---
+        let calTitle = NSTextField(labelWithString: "🔧 ATOMIC CALIBRATION")
+        calTitle.frame = NSRect(x: 20, y: 300, width: 250, height: 20)
         calTitle.font = .systemFont(ofSize: 12, weight: .bold)
-        calTitle.textColor = .systemRed // High precision color!
+        calTitle.textColor = .systemRed
         contentView.addSubview(calTitle)
         
         let calSwitch = NSButton(checkboxWithTitle: "Enable Calibration Ticks", target: self, action: #selector(toggleCalibration))
-        calSwitch.frame = NSRect(x: 20, y: 195, width: 200, height: 20)
+        calSwitch.frame = NSRect(x: 20, y: 275, width: 200, height: 20)
         contentView.addSubview(calSwitch)
         
         let offsetLabel = NSTextField(labelWithString: "Sync Offset: 310 ms")
-        offsetLabel.frame = NSRect(x: 20, y: 170, width: 200, height: 20)
+        offsetLabel.frame = NSRect(x: 20, y: 250, width: 200, height: 20)
         offsetLabel.tag = 601
         contentView.addSubview(offsetLabel)
         
         let slider = NSSlider(value: 310.0, minValue: 0.0, maxValue: 1000.0, target: self, action: #selector(onSliderMove))
-        slider.frame = NSRect(x: 20, y: 145, width: 310, height: 20)
+        slider.frame = NSRect(x: 20, y: 225, width: 310, height: 24)
+        slider.tag = 600
         contentView.addSubview(slider)
+        
+        // --- SONAR AUTO-CALIBRATE SECTION (v5.0.0) ---
+        let sonarTitle = NSTextField(labelWithString: "📡 SONAR AUTO-SYNC")
+        sonarTitle.frame = NSRect(x: 20, y: 190, width: 250, height: 20)
+        sonarTitle.font = .systemFont(ofSize: 12, weight: .bold)
+        sonarTitle.textColor = .systemGreen
+        contentView.addSubview(sonarTitle)
+
+        let autoBtn = NSButton(title: "🚀 RUN ACOUSTIC MEASUREMENT", target: self, action: #selector(startAutoCalibration))
+        autoBtn.frame = NSRect(x: 20, y: 155, width: 310, height: 32)
+        autoBtn.bezelStyle = .rounded
+        contentView.addSubview(autoBtn)
+        
+        let sonarStatus = NSTextField(labelWithString: "Ready for Sonar... Hold headphones to Mic! 📡")
+        sonarStatus.frame = NSRect(x: 20, y: 135, width: 310, height: 20)
+        sonarStatus.font = .systemFont(ofSize: 11)
+        sonarStatus.alignment = .center
+        sonarStatus.tag = 700
+        contentView.addSubview(sonarStatus)
         
         // --- STATUS SECTION ---
         let statusTitle = NSTextField(labelWithString: "STATUS:")
@@ -163,10 +185,11 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         statusTitle.font = .systemFont(ofSize: 11, weight: .bold)
         contentView.addSubview(statusTitle)
         
-        let statusText = NSTextField(labelWithString: "Searching for Android...")
-        statusText.frame = NSRect(x: 20, y: 80, width: 300, height: 20)
-        statusText.tag = 500
-        contentView.addSubview(statusText)
+        let windowStatus = NSTextField(labelWithString: "Searching for receiver...")
+        windowStatus.frame = NSRect(x: 20, y: 75, width: 310, height: 24)
+        windowStatus.font = .systemFont(ofSize: 14)
+        windowStatus.tag = 500
+        contentView.addSubview(windowStatus)
         
         // IP Manual Connect
         let manualBtn = NSButton(title: "Manual IP Connect...", target: self, action: #selector(promptForIP))
@@ -183,12 +206,97 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         captureManager.isMuted = isCalibrationEnabled
         
         if isCalibrationEnabled {
-            print("🚀 Atomic Sequencer Started (v4.0.0)")
+            print("🚀 Atomic Sequencer Started (v5.0.0)")
             setupAudioEngine()
+            requestMicrophoneAccess()
             startAtomicSequencer()
         } else {
             print("🛑 Atomic Sequencer Stopped")
             audioEngine?.stop()
+        }
+    }
+
+    private func requestMicrophoneAccess() {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                print(granted ? "🎤 Mic Access Granted" : "❌ Mic Access Denied")
+            }
+        case .restricted, .denied:
+            print("⚠️ Mic access denied. Auto-Calibration Won't work.")
+        case .authorized:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    @objc func startAutoCalibration() {
+        print("📡 Sonar Calibration Initiated...")
+        guard let status = mainWindow?.contentView?.viewWithTag(700) as? NSTextField else { return }
+        status.stringValue = "Measuring... Stay quiet! 🤫"
+        status.textColor = .systemGreen
+        
+        setupAudioEngine()
+        
+        // Start recording
+        sonarBuffer.removeAll()
+        sonarStartTime = Date()
+        isRecordingSonar = true
+        
+        // Send the pulse to Android
+        captureManager.sendCalibrationPulse()
+        
+        // Wait 1.5s for return, then analyze
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.isRecordingSonar = false
+            self?.analyzeSonarBuffer()
+        }
+    }
+
+    private func analyzeSonarBuffer() {
+        guard let status = mainWindow?.contentView?.viewWithTag(700) as? NSTextField else { return }
+        
+        if sonarBuffer.isEmpty {
+            status.stringValue = "Error: No audio recorded! ❌"
+            status.textColor = .systemRed
+            return
+        }
+        
+        // v5.0.0: Simple Peak Detection
+        // Look for the highest absolute value in the buffer
+        var maxVal: Float = 0
+        var maxIndex = 0
+        
+        for (i, sample) in sonarBuffer.enumerated() {
+            let absVal = abs(sample)
+            if absVal > maxVal {
+                maxVal = absVal
+                maxIndex = i
+            }
+        }
+        
+        // 48000 samples per second
+        let timeOffsetMs = Double(maxIndex) / 48.0
+        
+        // Minimum threshold check to avoid picking up floor noise
+        if maxVal < 0.1 {
+            status.stringValue = "Error: Pulse too quiet! 🔊⬆️"
+            status.textColor = .systemRed
+        } else {
+            print("🎯 Sonar detected peak at \(Int(timeOffsetMs))ms with magnitude \(maxVal)")
+            
+            // Update the slider and label
+            syncOffsetMs = timeOffsetMs
+            if let slider = mainWindow?.contentView?.viewWithTag(600) as? NSSlider {
+                slider.doubleValue = syncOffsetMs
+            }
+            if let label = mainWindow?.contentView?.viewWithTag(601) as? NSTextField {
+                label.stringValue = "Sync Offset: \(Int(syncOffsetMs)) ms"
+            }
+            
+            status.stringValue = "Auto-Synced: \(Int(timeOffsetMs)) ms! ✅"
+            status.textColor = .systemGreen
         }
     }
 
@@ -236,6 +344,36 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     }
 
     private func setupAudioEngine() {
+        if audioEngine != nil { return }
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        
+        let format = engine.mainMixerNode.outputFormat(forBus: 0)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        
+        do {
+            // Tap the input for Sonar
+            let inputNode = engine.inputNode
+            let inputFormat = inputNode.inputFormat(forBus: 0)
+            inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+                guard let self = self, self.isRecordingSonar else { return }
+                if let channelData = buffer.floatChannelData {
+                    let frameCount = Int(buffer.frameLength)
+                    let data = channelData[0]
+                    for i in 0..<frameCount {
+                        self.sonarBuffer.append(data[i])
+                    }
+                }
+            }
+
+            try engine.start()
+            self.audioEngine = engine
+            self.localSinePlayer = player
+        } catch {
+            print("❌ Calibration Audio Engine failed")
+        }
+    }
 
     private func playLocalTick() {
         guard let player = localSinePlayer, let engine = audioEngine, engine.isRunning else { return }
