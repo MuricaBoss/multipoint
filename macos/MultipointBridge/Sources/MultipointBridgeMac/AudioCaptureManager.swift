@@ -127,17 +127,6 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
             
-            // Silence Suppression
-            if maxAmp < silenceThreshold {
-                silenceCounter += 1
-            } else {
-                silenceCounter = 0
-            }
-            
-            if silenceCounter > silenceHangoverFrames {
-                return
-            }
-            
             let data = Data(bytes: interleavedInt16, count: interleavedInt16.count * 2)
             
             if var addr = targetAddress {
