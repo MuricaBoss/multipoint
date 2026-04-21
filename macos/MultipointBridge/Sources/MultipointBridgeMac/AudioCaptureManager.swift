@@ -107,14 +107,13 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
         if type == .audio {
             guard udpSocket >= 0 else { return }
             
-            var blockBuffer: CMBlockBuffer?
             let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
             guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription!)?.pointee else { return }
             
             let channelCount = Int(asbd.mChannelsPerFrame)
             let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
             
-            // Allocate space for the buffer list based on channel count
+            var blockBuffer: CMBlockBuffer?
             let bufferListPtr = AudioBufferList.allocate(maximumBuffers: channelCount)
             defer { free(bufferListPtr.unsafeMutablePointer) }
             
@@ -129,9 +128,9 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
                 blockBufferOut: &blockBuffer
             )
             
+            var pcmData = Data()
             var interleavedInt16 = [Int16]()
             interleavedInt16.reserveCapacity(frameCount * 2)
-            var maxAmp: Float = 0
             
             if channelCount == 2 {
                 let ptrL = bufferListPtr[0].mData?.assumingMemoryBound(to: Float.self)
@@ -139,41 +138,29 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
                 
                 if let l = ptrL, let r = ptrR {
                     for i in 0..<frameCount {
-                        let sL = l[i]
-                        let sR = r[i]
-                        maxAmp = max(maxAmp, abs(sL), abs(sR))
-                        
-                        interleavedInt16.append(Int16(max(-1.0, min(1.0, sL)) * 32767.0))
-                        interleavedInt16.append(Int16(max(-1.0, min(1.0, sR)) * 32767.0))
+                        interleavedInt16.append(Int16(max(-1.0, min(1.0, l[i])) * 32767.0))
+                        interleavedInt16.append(Int16(max(-1.0, min(1.0, r[i])) * 32767.0))
                     }
+                    pcmData = Data(bytes: interleavedInt16, count: interleavedInt16.count * 2)
                 }
             } else {
                 let ptr = bufferListPtr[0].mData?.assumingMemoryBound(to: Float.self)
                 if let p = ptr {
                     for i in 0..<frameCount {
-                        let sample = p[i]
-                        maxAmp = max(maxAmp, abs(sample))
-                        let val = Int16(max(-1.0, min(1.0, sample)) * 32767.0)
+                        let val = Int16(max(-1.0, min(1.0, p[i])) * 32767.0)
                         interleavedInt16.append(val)
                         interleavedInt16.append(val)
                     }
+                    pcmData = Data(bytes: interleavedInt16, count: interleavedInt16.count * 2)
                 }
             }
             
-            // Append new samples to accumulator
-            audioAccumulator.append(contentsOf: interleavedInt16)
-            
-            // Send in small 256-frame chunks (512 samples for stereo)
-            let samplesPerChunk = sendChunkSize * 2
-            while audioAccumulator.count >= samplesPerChunk {
-                let chunk = Array(audioAccumulator.prefix(samplesPerChunk))
-                audioAccumulator.removeFirst(samplesPerChunk)
-                
+            if !pcmData.isEmpty {
                 // Inject Timestamp (Diagnostic Header)
                 let timestamp = Int64(Date().timeIntervalSince1970 * 1000)
                 var packetData = Data()
                 withUnsafeBytes(of: timestamp.bigEndian) { packetData.append(contentsOf: $0) }
-                packetData.append(Data(bytes: chunk, count: chunk.count * 2))
+                packetData.append(pcmData)
                 
                 if var addr = targetAddress {
                     let bytes = packetData.withUnsafeBytes { $0.baseAddress }
