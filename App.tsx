@@ -244,7 +244,7 @@ function App(): React.JSX.Element {
       >
         <View style={styles.content}>
           <Text style={styles.title}>🎧 Multipoint Mixer</Text>
-          <Text style={styles.versionLabel}>v3.1.0</Text>
+          <Text style={styles.versionLabel}>v3.3.0</Text>
 
           {isUdpActive && (
             <View style={[styles.latencyMeter, { borderColor: latencyInfo.total > 150 ? '#ff4444' : latencyInfo.total > 50 ? '#ffbb33' : '#00ffaa' }]}>

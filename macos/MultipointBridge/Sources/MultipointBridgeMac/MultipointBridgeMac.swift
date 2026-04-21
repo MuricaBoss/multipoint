@@ -106,7 +106,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
             defer: false
         )
         window.center()
-        window.title = "Multipoint Mixer: Transmitter (v3.0.0)"
+        window.title = "Multipoint Mixer: Transmitter (v3.3.0)"
         window.isReleasedWhenClosed = false
         
         let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
@@ -115,11 +115,22 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         // --- DEVICE NAME SECTION ---
         let nameLabel = NSTextField(labelWithString: "DEVICE NAME:")
         nameLabel.frame = NSRect(x: 20, y: 170 + 130, width: 100, height: 20)
+        let titleLabel = NSTextField(labelWithString: "")
+        // --- TITLE SECTION ---
+        let titleLabel = NSTextField(labelWithString: "🔧 UNIFIED CALIBRATION (v3.3.0)")
+        titleLabel.frame = NSRect(x: 20, y: 310, width: 310, height: 24)
+        titleLabel.font = .systemFont(ofSize: 16, weight: .bold)
+        titleLabel.alignment = .center
+        contentView.addSubview(titleLabel)
+
+        // --- DEVICE NAME SECTION ---
+        let nameLabel = NSTextField(labelWithString: "DEVICE NAME:")
+        nameLabel.frame = NSRect(x: 20, y: 170 + 100, width: 100, height: 20)
         nameLabel.font = .systemFont(ofSize: 11, weight: .bold)
         contentView.addSubview(nameLabel)
         
         // Name Input field
-        let field = NSTextField(frame: NSRect(x: 20, y: 140 + 130, width: 230, height: 24))
+        let field = NSTextField(frame: NSRect(x: 20, y: 140 + 100, width: 230, height: 24))
         field.stringValue = customDeviceName
         field.font = .systemFont(ofSize: 14)
         contentView.addSubview(field)
@@ -173,6 +184,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
 
     @objc func toggleCalibration() {
         isCalibrating = !isCalibrating
+        captureManager.isMuted = isCalibrating // v3.1.2: Mute system audio during calibration
         if isCalibrating {
             startCalibrationLoop()
         } else {
@@ -189,7 +201,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
 
     private func startCalibrationLoop() {
         setupAudioEngine()
-        calibrationTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        calibrationTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in // v3.2.0: Slower cycle for rhythm
             self?.triggerCalibrationCycle()
         }
     }
@@ -219,14 +231,29 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     }
 
     private func triggerCalibrationCycle() {
-        // 1. Send Remote Pulse (Android) IMMEDIATELY
+        // v3.2.0: Rhythm Pattern (Double-Tap)
+        // Pulse 1
+        performSinglePulse()
+        
+        // Pulse 2 after 200ms
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.performSinglePulse()
+        }
+    }
+
+    private func performSinglePulse() {
+        // v3.3.0: Double-Beep Comparison (Headphones Only)
+        // 1. Send Audio Pulse (Slow Path) IMMEDIATELY
         captureManager.sendCalibrationPulse()
         
-        // 2. Play Local Pulse (Mac Speaker) DELAYED
+        // 2. Send Command Pulse (Fast Path) DELAYED by Slider
         let delaySeconds = syncOffsetMs / 1000.0
         DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds) { [weak self] in
-            self?.playLocalTick()
+            self?.captureManager.sendCommandPulse()
         }
+        
+        // 3. Local Feedback (Optional, for Mac Speaker reference)
+        // playLocalTick() // v3.3.0: Disabled by default to focus on headphones
     }
 
     private func playLocalTick() {
@@ -242,7 +269,7 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         for c in 0..<channels {
             let data = buffer.floatChannelData![c]
             for i in 0..<Int(frameCount) {
-                data[i] = sinf(Float(i) * 2.0 * Float.pi * 1000.0 / Float(sampleRate)) * 0.5
+                data[i] = sinf(Float(i) * 2.0 * Float.pi * 1200.0 / Float(sampleRate)) * 0.5
             }
         }
         

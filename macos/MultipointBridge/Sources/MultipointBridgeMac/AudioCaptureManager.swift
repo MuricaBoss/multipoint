@@ -11,6 +11,7 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     
     private var udpSocket: Int32 = -1
     private var targetAddress: sockaddr_in?
+    var isMuted: Bool = false // v3.1.2: Support muting system audio
     
     // VAD settings
     private let silenceThreshold: Float = 0.0001 // More sensitive (-80dB)
@@ -78,9 +79,12 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         
-        print("🖥️ Found Display: \(display.width)x\(display.height) (ID: \(display.displayID))")
+        // v3.1.3: Exclude THIS application from the capture to prevent feedback loops (like calibration pips)
+        let runningApps = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false).applications
+        let currentApp = runningApps.first(where: { $0.bundleIdentifier == Bundle.main.bundleIdentifier })
+        let excludedApps = currentApp != nil ? [currentApp!] : []
         
-        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let filter = SCContentFilter(display: display, excludingApplications: excludedApps, exceptingWindows: [])
         
         let config = SCStreamConfiguration()
         config.capturesAudio = true
@@ -106,6 +110,9 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     @objc func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         if type == .audio {
             guard udpSocket >= 0 else { return }
+            
+            // v3.1.2: If muted, skip system audio frames (only pulses will go through)
+            if isMuted { return }
             
             let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer)
             guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription!)?.pointee else { return }
@@ -164,22 +171,37 @@ class AudioCaptureManager: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func sendCalibrationPulse() {
-        // Generate 10ms of 1kHz square wave at 48kHz
+        // v3.3.0: Standard Audio Pulse (Hido reitti)
+        // Generate 10ms of 600Hz square wave at 48kHz
         let frameCount = 480 // 10ms
         var samples = [Int16]()
         samples.reserveCapacity(frameCount * 2)
         
         for i in 0..<frameCount {
-            // Square wave: 1kHz at 48kHz means 48 samples per cycle (24 high, 24 low)
-            let val = (i % 48 < 24) ? Int16(12000) : Int16(-12000)
-            samples.append(val) // L
-            samples.append(val) // R
+            // v3.1.3/v3.3.0: Remote Audio Pulse = 600Hz (Low Pop)
+            let val = (i % 80 < 40) ? Int16(12000) : Int16(-12000)
+            samples.append(val)
+            samples.append(val)
         }
         
         let pcmData = Data(bytes: samples, count: samples.count * 2)
         let timestamp = Int64(Date().timeIntervalSince1970 * 1000)
         sendPacket(pcmData: pcmData, timestamp: timestamp)
-        print("🔊 Calibration Pulse Sent to Android")
+        print("🔊 Audio Pulse (Slow) Sent to Android")
+    }
+
+    func sendCommandPulse() {
+        // v3.3.0: Fast-Path Command (Pikareitti)
+        let msg = "CMD:BEEP"
+        if let data = msg.data(using: .utf8), var addr = targetAddress {
+            let bytes = data.withUnsafeBytes { $0.baseAddress }
+            if let bytes = bytes {
+                sendto(udpSocket, bytes, data.count, 0, 
+                       withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
+                       socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+            print("⚡️ Command Pulse (Fast) Sent to Android")
+        }
     }
 
     private func sendPacket(pcmData: Data, timestamp: Int64) {
