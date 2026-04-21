@@ -204,6 +204,7 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
         new Thread(new Runnable() {
             @Override
             public void run() {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO);
                 try {
                     socket = new DatagramSocket(null);
                     socket.setReuseAddress(true);
