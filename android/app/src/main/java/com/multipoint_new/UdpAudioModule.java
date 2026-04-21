@@ -206,9 +206,8 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     socket.setReuseAddress(true);
                     socket.bind(new java.net.InetSocketAddress(9999));
                     
-                    // LATENCY KILLER: Reduce OS buffer from 1MB to 32KB. 
-                    // This prevents the OS from holding seconds of stale audio data during jitter.
-                    socket.setReceiveBufferSize(32 * 1024); 
+                    // SAFE MODE: Increase OS buffer to 128KB to handle bursts better.
+                    socket.setReceiveBufferSize(128 * 1024); 
                     
                     byte[] buffer = new byte[8192];
                     
@@ -221,9 +220,8 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
 
                         AudioTrack track = getOrCreateTrack(senderIp, 48000);
                         if (track != null && isRunning) {
-                            // Use NON_BLOCKING to ensure we always prioritize the latest incoming data
-                            // instead of queuing up behind old samples.
-                            track.write(buffer, 0, length, AudioTrack.WRITE_NON_BLOCKING);
+                            // SAFE MODE: Use standard blocking write for ultimate stability.
+                            track.write(buffer, 0, length);
                         }
                     }
                 } catch (Exception e) {
@@ -300,12 +298,12 @@ public class UdpAudioModule extends ReactContextBaseJavaModule {
                     .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                     .build();
             
-            // ROCK SOLID: Use 2048 frames for guaranteed stability. 
-            // (42ms at 48kHz). This is stable on almost all Android hardware.
+            // SAFE MODE: Use 4096 frames (~85ms) for total stability. 
+            // This is the baseline we need to cross to get clean audio.
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                int targetFrames = 2048; 
+                int targetFrames = 4096; 
                 int actualFrames = track.setBufferSizeInFrames(targetFrames);
-                Log.d(TAG, "✅ Rock Solid Tuned: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
+                Log.d(TAG, "✅ Safe Mode Tuned: Target " + targetFrames + " frames, Actual " + actualFrames + " frames");
             }
             
             track.play();

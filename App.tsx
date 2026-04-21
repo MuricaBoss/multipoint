@@ -237,7 +237,7 @@ function App(): React.JSX.Element {
       >
         <View style={styles.content}>
           <Text style={styles.title}>🎧 Multipoint Mixer</Text>
-          <Text style={styles.versionLabel}>v1.6.5</Text>
+          <Text style={styles.versionLabel}>v1.7.5</Text>
 
           <View style={styles.card}>
             <Text style={styles.label}>Your IP Address</Text>
