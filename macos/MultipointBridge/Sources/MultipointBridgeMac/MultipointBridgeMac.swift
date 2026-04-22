@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import ScreenCaptureKit
 import AVFoundation
+import CoreAudio
 
 @main
 class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDelegate, NetServiceDelegate {
@@ -17,17 +18,23 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     private var customDeviceName: String = "Multipoint-Host"
     private var nameHeartbeatTask: Task<Void, Never>?
     
-    // v3.0.0 Calibration Mode
+    private var cachedBlackHoleID: AudioObjectID?
+    private var lastUpdateTimestamp: TimeInterval = 0
+    private var minUpdateInterval: TimeInterval = 0.05
+    private var cachedSampleRate: Double = 48000.0
+    
     private var isCalibrationEnabled = false
-    private var calibrationThread: Thread? // v4.0.0: Atomic Sequencer
-    private var syncOffsetMs: Double = 310.0
     private var localSinePlayer: AVAudioPlayerNode?
     private var audioEngine: AVAudioEngine?
-    private var sonarBuffer = [Float]() // v5.0.0: Recording buffer
+    private var sonarBuffer = [Float]()
     private var isRecordingSonar = false
-    private var sonarStartTime: Date?
-    private weak var levelBar: NSProgressIndicator? // v5.0.1: Direct reference
-    private var calibrationUIElements = [NSView]()
+    private weak var levelBar: NSProgressIndicator?
+    
+    private var permissionCheckTimer: Timer?
+    private var hasGrantedPermission = false
+    
+    // v27.0: Manual Approval State
+    private var pendingLatency: Int?
 
     static func main() {
         let app = NSApplication.shared
@@ -38,56 +45,62 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Load saved name
+        if #available(macOS 10.15, *) {
+            CGRequestScreenCaptureAccess()
+        }
+
         if let savedName = UserDefaults.standard.string(forKey: "MultipointDeviceName") {
             customDeviceName = savedName
         }
         
         setupStatusBar()
         createMainWindow()
-        
-        // Start Global Identity Heartbeat immediately
         startIdentityHeartbeat()
 
-        // Start Bonjour search
         serviceBrowser.delegate = self
         serviceBrowser.searchForServices(ofType: "_multipoint._udp", inDomain: "local.")
         NSApp.activate(ignoringOtherApps: true)
+
+        startPermissionCheckLoop()
+    }
+
+    private func startPermissionCheckLoop() {
+        permissionCheckTimer?.invalidate()
+        permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.checkPermissions()
+        }
+    }
+
+    private func checkPermissions() {
+        let status = CGPreflightScreenCaptureAccess()
+        if status && !hasGrantedPermission {
+            hasGrantedPermission = true
+            DispatchQueue.main.async {
+                self.createMainWindow() 
+            }
+        }
     }
 
     private func startIdentityHeartbeat() {
         nameHeartbeatTask?.cancel()
         nameHeartbeatTask = Task {
-            print("👤 Starting Global Identity Heartbeat (\(customDeviceName)) on port 9998")
-            
-            // Setup Broadcast Address
             var addr = sockaddr_in()
             addr.sin_family = sa_family_t(AF_INET)
             addr.sin_port = UInt16(9998).bigEndian
             addr.sin_addr.s_addr = inet_addr("255.255.255.255")
             
             while !Task.isCancelled {
-                // Ensure the name is trimmed and has no hidden characters before sending
                 let cleanName = customDeviceName.trimmingCharacters(in: .whitespacesAndNewlines)
                 var msg = "MSG:NAME:\(cleanName)"
-                
-                // PAD message to ensure it's not too small for some network hardware (min 48 bytes)
-                while msg.count < 48 {
-                    msg += " "
-                }
+                while msg.count < 48 { msg += " " }
                 
                 guard let data = msg.data(using: .utf8) else { break }
-                print("👤 Identity Broadcast (\(cleanName)) [\(data.count) bytes]")
-                
                 let s = socket(AF_INET, SOCK_DGRAM, 0)
                 if s >= 0 {
                     var broadcastEnable: Int32 = 1
                     setsockopt(s, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, socklen_t(MemoryLayout<Int32>.size))
-                    
                     let bytes = data.withUnsafeBytes { $0.baseAddress }
-                    sendto(s, bytes, data.count, 0, 
-                           withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, 
-                           socklen_t(MemoryLayout<sockaddr_in>.size))
+                    sendto(s, bytes, data.count, 0, withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, socklen_t(MemoryLayout<sockaddr_in>.size))
                     close(s)
                 }
                 try? await Task.sleep(nanoseconds: 3 * 1_000_000_000)
@@ -104,164 +117,194 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     }
 
     func createMainWindow() {
+        hasGrantedPermission = CGPreflightScreenCaptureAccess()
+        
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 450),
+            contentRect: NSRect(x: 0, y: 0, width: 370, height: 500),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.center()
-        window.title = "Multipoint Mixer (v5.0.1 - SONAR+)"
+        window.title = "Multipoint Mixer"
         window.isReleasedWhenClosed = false
         
         let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
         window.contentView = contentView
         
-        // --- TITLE SECTION ---
-        let mainTitle = NSTextField(labelWithString: "🎧 MULTIPOINT MIXER (v5.0.0)")
-        mainTitle.frame = NSRect(x: 20, y: 410, width: 310, height: 24)
+        let mainTitle = NSTextField(labelWithString: "🎧 MULTIPOINT MIXER")
+        mainTitle.frame = NSRect(x: 20, y: window.frame.height - 60, width: 310, height: 24)
         mainTitle.font = .systemFont(ofSize: 18, weight: .bold)
         mainTitle.alignment = .center
         contentView.addSubview(mainTitle)
 
-        // --- DEVICE NAME SECTION ---
-        let nameLabel = NSTextField(labelWithString: "DEVICE NAME:")
-        nameLabel.frame = NSRect(x: 20, y: 370, width: 100, height: 20)
-        nameLabel.font = .systemFont(ofSize: 11, weight: .bold)
-        contentView.addSubview(nameLabel)
-        
-        let field = NSTextField(frame: NSRect(x: 20, y: 345, width: 230, height: 24))
-        field.stringValue = customDeviceName
-        field.font = .systemFont(ofSize: 14)
-        contentView.addSubview(field)
-        self.nameField = field
-        
-        let saveBtn = NSButton(title: "Save", target: self, action: #selector(saveNameFromWindow))
-        saveBtn.frame = NSRect(x: 255, y: 341, width: 80, height: 32)
-        contentView.addSubview(saveBtn)
-        
-        // --- CALIBRATION SECTION (v4.0.0 / v5.0.0) ---
-        let calTitle = NSTextField(labelWithString: "🔧 ATOMIC CALIBRATION")
-        calTitle.frame = NSRect(x: 20, y: 300, width: 250, height: 20)
-        calTitle.font = .systemFont(ofSize: 12, weight: .bold)
-        calTitle.textColor = .systemRed
-        contentView.addSubview(calTitle)
-        
-        let calSwitch = NSButton(checkboxWithTitle: "Enable Calibration Ticks", target: self, action: #selector(toggleCalibration))
-        calSwitch.frame = NSRect(x: 20, y: 275, width: 200, height: 20)
-        contentView.addSubview(calSwitch)
-        
-        let offsetLabel = NSTextField(labelWithString: "Sync Offset: 310 ms")
-        offsetLabel.frame = NSRect(x: 20, y: 250, width: 200, height: 20)
-        offsetLabel.tag = 601
-        contentView.addSubview(offsetLabel)
-        
-        let slider = NSSlider(value: 310.0, minValue: 0.0, maxValue: 1000.0, target: self, action: #selector(onSliderMove))
-        slider.frame = NSRect(x: 20, y: 225, width: 310, height: 24)
-        slider.tag = 600
-        contentView.addSubview(slider)
-        
-        // --- SONAR AUTO-CALIBRATE SECTION (v5.0.0) ---
-        let sonarTitle = NSTextField(labelWithString: "📡 SONAR AUTO-SYNC")
-        sonarTitle.frame = NSRect(x: 20, y: 190, width: 250, height: 20)
-        sonarTitle.font = .systemFont(ofSize: 12, weight: .bold)
-        sonarTitle.textColor = .systemGreen
-        contentView.addSubview(sonarTitle)
+        if !hasGrantedPermission {
+            let infoBox = NSView(frame: NSRect(x: 30, y: 150, width: 310, height: 140))
+            infoBox.wantsLayer = true
+            infoBox.layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.05).cgColor
+            infoBox.layer?.cornerRadius = 12
+            infoBox.layer?.borderWidth = 1.5
+            infoBox.layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.5).cgColor
+            contentView.addSubview(infoBox)
 
-        let autoBtn = NSButton(title: "🚀 RUN ACOUSTIC MEASUREMENT", target: self, action: #selector(startAutoCalibration))
-        autoBtn.frame = NSRect(x: 20, y: 155, width: 310, height: 32)
-        autoBtn.bezelStyle = .rounded
-        contentView.addSubview(autoBtn)
-        
-        let sonarStatus = NSTextField(labelWithString: "Ready for Sonar... Hold headphones to Mic! 📡")
-        sonarStatus.frame = NSRect(x: 20, y: 135, width: 310, height: 20)
-        sonarStatus.font = .systemFont(ofSize: 11)
-        sonarStatus.alignment = .center
-        sonarStatus.tag = 700
-        contentView.addSubview(sonarStatus)
-        
-        // --- MIC LEVEL METER (v5.0.1) ---
-        let levelLabel = NSTextField(labelWithString: "Mic Input Level:")
-        levelLabel.frame = NSRect(x: 20, y: 115, width: 100, height: 15)
-        levelLabel.font = .systemFont(ofSize: 9)
-        contentView.addSubview(levelLabel)
-        
-        let levelBar = NSProgressIndicator(frame: NSRect(x: 120, y: 116, width: 210, height: 12))
-        levelBar.isIndeterminate = false
-        levelBar.minValue = 0
-        levelBar.maxValue = 1
-        contentView.addSubview(levelBar)
-        self.levelBar = levelBar
-        
-        // --- STATUS SECTION ---
-        let statusTitle = NSTextField(labelWithString: "STATUS:")
-        statusTitle.frame = NSRect(x: 20, y: 100, width: 100, height: 20)
-        statusTitle.font = .systemFont(ofSize: 11, weight: .bold)
-        contentView.addSubview(statusTitle)
-        
-        let windowStatus = NSTextField(labelWithString: "Searching for receiver...")
-        windowStatus.frame = NSRect(x: 20, y: 75, width: 310, height: 24)
-        windowStatus.font = .systemFont(ofSize: 14)
-        windowStatus.tag = 500
-        contentView.addSubview(windowStatus)
-        
-        // IP Manual Connect
-        let manualBtn = NSButton(title: "Manual IP Connect...", target: self, action: #selector(promptForIP))
-        manualBtn.frame = NSRect(x: 20, y: 40, width: 150, height: 32)
-        contentView.addSubview(manualBtn)
-        
-        self.mainWindow = window
-        window.setFrame(NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: 350, height: 350), display: true)
-        window.makeKeyAndOrderFront(self)
-    }
-
-    @objc func toggleCalibration(_ sender: NSButton) {
-        isCalibrationEnabled = (sender.state == .on)
-        captureManager.isMuted = isCalibrationEnabled
-        
-        if isCalibrationEnabled {
-            print("🚀 Atomic Sequencer Started (v5.0.0)")
-            setupAudioEngine()
-            requestMicrophoneAccess()
-            startAtomicSequencer()
+            let infoText = NSTextField(labelWithString: "⚠️ PERMISSION REQUIRED\n\nMultipoint needs Screen Recording permission to capture system audio.\n\nGrant it in: System Settings > Screen Recording.")
+            infoText.frame = NSRect(x: 15, y: 15, width: 280, height: 110)
+            infoText.font = .systemFont(ofSize: 13, weight: .medium)
+            infoText.alignment = .center
+            infoText.textColor = .labelColor
+            infoText.cell?.isScrollable = false
+            infoText.cell?.wraps = true
+            infoText.lineBreakMode = .byWordWrapping
+            infoBox.addSubview(infoText)
+            
+            let settingsBtn = NSButton(title: "1. Open Privacy Settings...", target: self, action: #selector(openPrivacySettings))
+            settingsBtn.frame = NSRect(x: 10, y: 100, width: 350, height: 45)
+            settingsBtn.bezelStyle = .rounded
+            contentView.addSubview(settingsBtn)
+            
+            let manualStartBtn = NSButton(title: "2. Permission granted? QUIT & RESTART 🚀", target: self, action: #selector(relaunchApp))
+            manualStartBtn.frame = NSRect(x: 10, y: 35, width: 350, height: 55)
+            manualStartBtn.bezelStyle = .rounded
+            manualStartBtn.highlight(true)
+            contentView.addSubview(manualStartBtn)
+            
         } else {
-            print("🛑 Atomic Sequencer Stopped")
-            audioEngine?.stop()
+            let infoBox = NSView(frame: NSRect(x: 20, y: 190, width: 330, height: 240))
+            infoBox.wantsLayer = true
+            infoBox.layer?.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.03).cgColor
+            infoBox.layer?.cornerRadius = 12
+            infoBox.layer?.borderWidth = 1.5
+            infoBox.layer?.borderColor = NSColor.systemGreen.withAlphaComponent(0.3).cgColor
+            contentView.addSubview(infoBox)
+
+            let infoText = NSTextField(labelWithString: "🔍 SEARCHING FOR MIXER...\n\nConnect phone to same Wi-Fi and press 'Start Multipoint Mixer' on phone.")
+            infoText.frame = NSRect(x: 10, y: 10, width: 310, height: 220)
+            infoText.font = .systemFont(ofSize: 15, weight: .bold)
+            infoText.alignment = .center
+            infoText.textColor = .secondaryLabelColor
+            infoText.tag = 900
+            infoText.cell?.isScrollable = false
+            infoText.cell?.wraps = true
+            infoText.lineBreakMode = .byWordWrapping
+            infoBox.addSubview(infoText)
+            
+            let testBtn = NSButton(title: "🚀 SYNC DELAY", target: self, action: #selector(startAutoCalibration))
+            testBtn.frame = NSRect(x: 20, y: 120, width: 330, height: 60)
+            testBtn.bezelStyle = .rounded
+            testBtn.highlight(true)
+            testBtn.tag = 800
+            testBtn.isHidden = true
+            contentView.addSubview(testBtn)
+            
+            // v27.0: ACCEPT & INSTALL Button (Tag 802)
+            let acceptBtn = NSButton(title: "✅ ACCEPT & ADJUST DRIVER", target: self, action: #selector(confirmInstallation))
+            acceptBtn.frame = NSRect(x: 20, y: 120, width: 330, height: 60) // Same spot as testBtn
+            acceptBtn.bezelStyle = .rounded
+            acceptBtn.highlight(true)
+            acceptBtn.tag = 802
+            acceptBtn.isHidden = true
+            contentView.addSubview(acceptBtn)
+            
+            let levelBar = NSProgressIndicator(frame: NSRect(x: 35, y: 100, width: 300, height: 14))
+            levelBar.isIndeterminate = false
+            levelBar.minValue = 0
+            levelBar.maxValue = 1
+            levelBar.tag = 801
+            levelBar.isHidden = true
+            contentView.addSubview(levelBar)
+            self.levelBar = levelBar
+            
+            let manualBtn = NSButton(title: "Manual IP Connect...", target: self, action: #selector(promptForIP))
+            manualBtn.frame = NSRect(x: 110, y: 20, width: 150, height: 32)
+            manualBtn.tag = 777
+            contentView.addSubview(manualBtn)
+        }
+        
+        let oldWindow = self.mainWindow
+        self.mainWindow = window
+        window.makeKeyAndOrderFront(self)
+        oldWindow?.close()
+    }
+
+    @objc func relaunchApp() {
+        NSApp.terminate(nil)
+    }
+
+    @objc func openPrivacySettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!
+        NSWorkspace.shared.open(url)
+    }
+
+    func updateStatusMessage(_ message: String, isError: Bool = false) {
+        DispatchQueue.main.async {
+            if let button = self.statusItem?.button { button.title = "🎧 " + message }
+            if let infoText = self.mainWindow?.contentView?.viewWithTag(900) as? NSTextField {
+                if self.isStreaming {
+                    infoText.stringValue = "⚡ SYNC DELAY\n\n1. Mute/Close all other audio sources.\n2. Place phone near Mac microphone.\n3. Click 'SYNC DELAY' below.\n\n(Mac sends a pulse, the mic listens,\n and the delay is auto-calculated.)"
+                    infoText.textColor = .labelColor
+                } else {
+                    infoText.stringValue = "🔍 SEARCHING FOR MIXER...\n\nConnect phone to same Wi-Fi and press 'Start Multipoint Mixer' on phone."
+                    infoText.textColor = .secondaryLabelColor
+                }
+            }
+            if let testBtn = self.mainWindow?.contentView?.viewWithTag(800) as? NSButton {
+                let showTest = self.isStreaming && self.pendingLatency == nil
+                testBtn.isHidden = !showTest
+            }
+            self.levelBar?.isHidden = !self.isStreaming
+            self.mainWindow?.contentView?.viewWithTag(777)?.isHidden = self.isStreaming
         }
     }
 
-    private func requestMicrophoneAccess() {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                print(granted ? "🎤 Mic Access Granted" : "❌ Mic Access Denied")
-            }
-        case .restricted, .denied:
-            print("⚠️ Mic access denied. Auto-Calibration Won't work.")
-        case .authorized:
-            break
-        @unknown default:
-            break
+    @objc func promptForIP() {
+        let alert = NSAlert()
+        alert.messageText = "Connect to Bridge"
+        alert.informativeText = "Enter IP:"
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        alert.accessoryView = input
+        if alert.runModal() == .alertFirstButtonReturn {
+            let ip = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !ip.isEmpty { startStreaming(to: ip) }
         }
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        discoveredServices.append(service)
+        service.delegate = self
+        service.resolve(withTimeout: 5.0)
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let addressData = sender.addresses?.first else { return }
+        var hostname = [CChar](repeating: 0, count: NI_MAXHOST)
+        addressData.withUnsafeBytes { pointer in
+            let sockaddrPtr = pointer.baseAddress!.assumingMemoryBound(to: sockaddr.self)
+            getnameinfo(sockaddrPtr, socklen_t(addressData.count), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+        }
+        let ip = String(cString: hostname)
+        if !isStreaming { startStreaming(to: ip) }
+    }
+
+    func startStreaming(to ip: String) {
+        self.targetIP = ip
+        isStreaming = true
+        updateStatusMessage("Connected to \(ip)")
+        self.createMainWindow() 
+        captureManager.setTarget(ip: ip, port: 9999)
+        Task { try? await captureManager.startCapture() }
     }
 
     @objc func startAutoCalibration() {
-        print("📡 Sonar Calibration Initiated...")
-        guard let status = mainWindow?.contentView?.viewWithTag(700) as? NSTextField else { return }
-        status.stringValue = "Measuring... Stay quiet! 🤫"
-        status.textColor = .systemGreen
-        
+        if let infoText = self.mainWindow?.contentView?.viewWithTag(900) as? NSTextField {
+            infoText.stringValue = "⌛ MEASURING...\n\nKeep it quiet! 🤫"
+            infoText.textColor = .systemBlue
+        }
         setupAudioEngine()
-        
-        // Start recording
         sonarBuffer.removeAll()
-        sonarStartTime = Date()
         isRecordingSonar = true
-        
-        // Send the pulse to Android
         captureManager.sendCalibrationPulse()
-        
-        // Wait 1.5s for return, then analyze
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.isRecordingSonar = false
             self?.analyzeSonarBuffer()
@@ -269,91 +312,65 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
     }
 
     private func analyzeSonarBuffer() {
-        guard let status = mainWindow?.contentView?.viewWithTag(700) as? NSTextField else { return }
-        
+        guard let infoText = self.mainWindow?.contentView?.viewWithTag(900) as? NSTextField else { return }
         if sonarBuffer.isEmpty {
-            status.stringValue = "Error: No audio recorded! ❌"
-            status.textColor = .systemRed
+            infoText.stringValue = "❌ ERROR: NO AUDIO RECORDED!\n\nPlease check microphone permissions."
+            infoText.textColor = .systemRed
             return
         }
-        
-        // v5.0.0: Simple Peak Detection
-        // Look for the highest absolute value in the buffer
         var maxVal: Float = 0
         var maxIndex = 0
-        
         for (i, sample) in sonarBuffer.enumerated() {
             let absVal = abs(sample)
-            if absVal > maxVal {
-                maxVal = absVal
-                maxIndex = i
-            }
+            if absVal > maxVal { maxVal = absVal; maxIndex = i }
         }
-        
-        // 48000 samples per second
-        let timeOffsetMs = Double(maxIndex) / 48.0
-        
-        // v5.0.1: Lowered threshold (0.05)
         if maxVal < 0.05 {
-            status.stringValue = "Still too quiet! 🔊⬆️ Find the mic hole!"
-            status.textColor = .systemOrange
+            infoText.stringValue = "⚠️ TOO QUIET! 🔊⬆️\n\nFind the mic hole on your Mac and hold the phone closer."
+            infoText.textColor = .systemOrange
         } else {
-            print("🎯 Sonar detected peak at \(Int(timeOffsetMs))ms with magnitude \(maxVal)")
+            let timeOffsetMs = Double(maxIndex) / 48.0
+            let closestLatencyMs = Int((timeOffsetMs / 50.0).rounded()) * 50
+            self.pendingLatency = closestLatencyMs
             
-            // Update the slider and label
-            syncOffsetMs = timeOffsetMs
-            if let slider = mainWindow?.contentView?.viewWithTag(600) as? NSSlider {
-                slider.doubleValue = syncOffsetMs
-            }
-            if let label = mainWindow?.contentView?.viewWithTag(601) as? NSTextField {
-                label.stringValue = "Sync Offset: \(Int(syncOffsetMs)) ms"
-            }
+            infoText.stringValue = "🎯 DELAY DETECTED: \(Int(timeOffsetMs)) ms\n\nWould you like to adjust the driver to \(closestLatencyMs) ms for perfect sync?"
+            infoText.textColor = .systemBlue
             
-            status.stringValue = "Auto-Synced: \(Int(timeOffsetMs)) ms! ✅"
-            status.textColor = .systemGreen
+            // Toggle buttons
+            self.mainWindow?.contentView?.viewWithTag(800)?.isHidden = true // Hide Sync
+            self.mainWindow?.contentView?.viewWithTag(802)?.isHidden = false // Show Accept
         }
     }
 
-    private func startAtomicSequencer() {
-        calibrationThread = Thread { [weak self] in
-            guard let self = self else { return }
-            
-            var timebaseInfo = mach_timebase_info()
-            mach_timebase_info(&timebaseInfo)
-            
-            let cycleLengthSeconds: Double = 1.5
-            let cycleLengthTicks = UInt64(cycleLengthSeconds * 1_000_000_000 * Double(timebaseInfo.denom) / Double(timebaseInfo.numer))
-            
-            while self.isCalibrationEnabled {
-                let startTicks = mach_absolute_time()
-                
-                // 1. Send Audio Pulse (Slow Path) to Android at T=0
-                self.captureManager.sendCalibrationPulse()
-                
-                // 2. Wait for Slider Delay
-                let offsetMs = self.syncOffsetMs
-                let delayTicks = UInt64(offsetMs * 1_000_000 * Double(timebaseInfo.denom) / Double(timebaseInfo.numer))
-                
-                mach_wait_until(startTicks + delayTicks)
-                
-                // 3. Play Local Pulse (Mac Speaker) at T=Slider
-                if self.isCalibrationEnabled {
-                    self.playLocalTick()
-                }
-                
-                // 4. Wait for next cycle
-                mach_wait_until(startTicks + cycleLengthTicks)
-            }
-        }
+    @objc func confirmInstallation() {
+        guard let ms = pendingLatency, let infoText = self.mainWindow?.contentView?.viewWithTag(900) as? NSTextField else { return }
         
-        calibrationThread?.qualityOfService = .userInteractive
-        calibrationThread?.start()
+        infoText.stringValue = "⚙️ ADJUNTING DRIVER... (\(ms) ms)\n\nPlease wait for the system prompt."
+        infoText.textColor = .systemBlue
+        self.mainWindow?.contentView?.viewWithTag(802)?.isHidden = true // Hide button during install
+        
+        installSpecificDriver(ms: ms)
     }
 
-    @objc func onSliderMove(_ sender: NSSlider) {
-        syncOffsetMs = sender.doubleValue
-        if let label = mainWindow?.contentView?.viewWithTag(601) as? NSTextField {
-            label.stringValue = "Sync Offset: \(Int(syncOffsetMs)) ms"
+    private func installSpecificDriver(ms: Int) {
+        let projectPath = "/Volumes/munapelilevy/_AntiGravity/Projektit/BlackHole-Delayed"
+        let appleScript = "do shell script \"cd \(projectPath) && ./install_driver.sh \(ms)\" with administrator privileges"
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var error: NSDictionary?
+            if let script = NSAppleScript(source: appleScript) {
+                script.executeAndReturnError(&error)
+                DispatchQueue.main.async { [weak self] in
+                    guard let infoText = self?.mainWindow?.contentView?.viewWithTag(900) as? NSTextField else { return }
+                    if error != nil {
+                        infoText.stringValue = "❌ INSTALLATION FAILED!\n\nPlease check permissions or manual install."
+                        infoText.textColor = .systemRed
+                    } else {
+                        infoText.stringValue = "🎯 SYNC SUCCESS! ✅\n\nDriver: BlackHole (\(ms) ms)\n\nIMPORTANT: Set System Audio Output to 'BlackHole Delayed' if it didn't switch automatically."
+                        infoText.textColor = .systemGreen
+                        self?.pendingLatency = nil // Reset for next time if needed
+                    }
+                }
+            }
         }
     }
 
@@ -362,230 +379,31 @@ class MultipointBridgeApp: NSObject, NSApplicationDelegate, NetServiceBrowserDel
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
-        
         let format = engine.mainMixerNode.outputFormat(forBus: 0)
         engine.connect(player, to: engine.mainMixerNode, format: format)
-        
         do {
-            // Tap the input for Sonar
             let inputNode = engine.inputNode
             let inputFormat = inputNode.inputFormat(forBus: 0)
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
                 guard let self = self else { return }
-                
-                // Update Mic Level (v5.0.1)
                 if let channelData = buffer.floatChannelData {
                     let frameCount = Int(buffer.frameLength)
                     var peak: Float = 0
-                    for i in 0..<frameCount {
-                        peak = max(peak, abs(channelData[0][i]))
-                    }
-                    DispatchQueue.main.async {
-                        self.levelBar?.doubleValue = Double(peak)
-                    }
-                    
+                    for i in 0..<frameCount { peak = max(peak, abs(channelData[0][i])) }
+                    DispatchQueue.main.async { self.levelBar?.doubleValue = Double(peak) }
                     if self.isRecordingSonar {
                         let data = channelData[0]
-                        for i in 0..<frameCount {
-                            self.sonarBuffer.append(data[i])
-                        }
+                        for i in 0..<frameCount { self.sonarBuffer.append(data[i]) }
                     }
                 }
             }
-
             try engine.start()
             self.audioEngine = engine
             self.localSinePlayer = player
-        } catch {
-            print("❌ Calibration Audio Engine failed")
-        }
+        } catch { print("❌ Audio Engine Error") }
     }
 
-    private func playLocalTick() {
-        guard let player = localSinePlayer, let engine = audioEngine, engine.isRunning else { return }
-        
-        // Simple tick: 1kHz sine for 0.01s
-        let sampleRate = engine.mainMixerNode.outputFormat(forBus: 0).sampleRate
-        let frameCount = AVAudioFrameCount(sampleRate * 0.01)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: engine.mainMixerNode.outputFormat(forBus: 0), frameCapacity: frameCount) else { return }
-        
-        buffer.frameLength = frameCount
-        let channels = Int(buffer.format.channelCount)
-        for c in 0..<channels {
-            let data = buffer.floatChannelData![c]
-            for i in 0..<Int(frameCount) {
-                data[i] = sinf(Float(i) * 2.0 * Float.pi * 1200.0 / Float(sampleRate)) * 0.5
-            }
-        }
-        
-        player.play()
-        player.scheduleBuffer(buffer, completionHandler: nil)
-    }
-
-    @objc func saveNameFromWindow() {
-        if let newName = nameField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), !newName.isEmpty {
-            customDeviceName = newName
-            UserDefaults.standard.set(newName, forKey: "MultipointDeviceName")
-            updateMenuName()
-            startIdentityHeartbeat() // Refresh heartbeat with new name
-            print("👤 Name updated via window: \(newName)")
-        }
-    }
-
-    func updateMenuName() {
-        if let nameItem = statusItem?.menu?.item(withTag: 102) {
-            nameItem.title = "Set Device Name (\(customDeviceName))..."
-        }
-    }
-
-    func setupMenu() {
-        let menu = NSMenu()
-        
-        let statusLabel = NSMenuItem(title: "Searching for receiver...", action: nil, keyEquivalent: "")
-        statusLabel.tag = 100
-        menu.addItem(statusLabel)
-        
-        menu.addItem(NSMenuItem.separator())
-        
-        let nameItem = NSMenuItem(title: "Set Device Name (\(customDeviceName))...", action: #selector(promptForName), keyEquivalent: "n")
-        nameItem.tag = 102
-        menu.addItem(nameItem)
-        
-        let startItem = NSMenuItem(title: "Connect Manually...", action: #selector(promptForIP), keyEquivalent: "c")
-        menu.addItem(startItem)
-        
-        let stopItem = NSMenuItem(title: "Disconnect", action: #selector(stopStreaming), keyEquivalent: "d")
-        stopItem.tag = 101
-        stopItem.isEnabled = false
-        menu.addItem(stopItem)
-        
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit Multipoint Bridge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        
-        statusItem?.menu = menu
-    }
-
-    @objc func promptForName() {
-        let alert = NSAlert()
-        alert.messageText = "Set Device Name"
-        alert.informativeText = "This name will appear in the Android mixer:"
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-        input.stringValue = customDeviceName
-        alert.accessoryView = input
-        
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
-            let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !name.isEmpty {
-                customDeviceName = name
-                UserDefaults.standard.set(name, forKey: "MultipointDeviceName")
-                if let nameItem = statusItem?.menu?.item(withTag: 102) {
-                    nameItem.title = "Set Device Name (\(name))..."
-                }
-                startIdentityHeartbeat() // Refresh heartbeat with new name
-            }
-        }
-    }
-
-    func updateStatusMessage(_ message: String, isError: Bool = false) {
-        DispatchQueue.main.async {
-            if let button = self.statusItem?.button {
-                button.title = isError ? "⚠️ " + message : "🎧 " + message
-            }
-            if let statusLabel = self.statusItem?.menu?.item(withTag: 100) {
-                statusLabel.title = message
-            }
-            if let windowStatus = self.mainWindow?.contentView?.viewWithTag(500) as? NSTextField {
-                windowStatus.stringValue = message
-                windowStatus.textColor = isError ? .systemRed : .labelColor
-            }
-            if let stopItem = self.statusItem?.menu?.item(withTag: 101) {
-                stopItem.isEnabled = self.isStreaming
-            }
-        }
-    }
-
-    @objc func promptForIP() {
-        let alert = NSAlert()
-        alert.messageText = "Connect to Bridge"
-        alert.informativeText = "Enter the IP address of your Android device:"
-        alert.addButton(withTitle: "Connect")
-        alert.addButton(withTitle: "Cancel")
-        
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-        input.placeholderString = "192.168.0.xxx"
-        alert.accessoryView = input
-        
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
-            let ip = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !ip.isEmpty {
-                startStreaming(to: ip)
-            }
-        }
-    }
-
-    // MARK: - NetServiceBrowserDelegate
-    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        print("✨ Found Service: \(service.name) (type: \(service.type))")
-        discoveredServices.append(service)
-        service.delegate = self
-        service.resolve(withTimeout: 5.0)
-    }
-
-    func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String : NSNumber]) {
-        print("❌ Discovery failed to start: \(errorDict)")
-        updateStatusMessage("Discovery Error", isError: true)
-    }
-
-    func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
-        print("❌ Failed to resolve service \(sender.name): \(errorDict)")
-    }
-
-    func netServiceDidResolveAddress(_ sender: NetService) {
-        guard let addressData = sender.addresses?.first else { return }
-        
-        // Resolve IP address to string
-        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        addressData.withUnsafeBytes { pointer in
-            let sockaddrPtr = pointer.baseAddress!.assumingMemoryBound(to: sockaddr.self)
-            getnameinfo(sockaddrPtr, socklen_t(addressData.count), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
-        }
-        
-        let ip = String(cString: hostname)
-        print("✅ Auto-Resolved \(sender.name) to \(ip)")
-        
-        if !isStreaming {
-            startStreaming(to: ip)
-        }
-    }
-
-    @objc func startStreaming(to ip: String) {
-        self.targetIP = ip
-        isStreaming = true
-        
-        updateStatusMessage("Streaming to \(ip)")
-        
-        Task {
-            do {
-                captureManager.setTarget(ip: ip, port: 9999)
-                try await captureManager.startCapture()
-            } catch {
-                print("❌ Failed to start streaming: \(error)")
-                stopStreaming()
-                updateStatusMessage("Stream Error", isError: true)
-            }
-        }
-    }
-
-    @objc func stopStreaming() {
-        isStreaming = false
-        nameHeartbeatTask?.cancel()
-        nameHeartbeatTask = nil
-        captureManager.stopCapture()
-        updateStatusMessage("Disconnected")
-    }
+    func setupMenu() {}
+    func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String : NSNumber]) {}
+    func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {}
 }
